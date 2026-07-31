@@ -2,16 +2,32 @@ services:
   aiops-db:
     container_name: aiops_db
     image: postgres:17-alpine
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
       - aiops-db-data:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_HOST_PORT}:5432"
+      - "${POSTGRES_HOST_PORT:-3111}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
       retries: 10
+    networks: [aiops]
+
+  aiops-pgadmin:
+    image: docker.io/dpage/pgadmin4:latest
+    container_name: pgadmin4
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "${PGADMIN_HOST_PORT:-3112}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - aiops-db
     networks: [aiops]
 
   # Python (FastAPI) — incident analysis backend + frontend static files.
@@ -19,16 +35,36 @@ services:
     build:
       context: .
       dockerfile: aiops/Dockerfile
-    container_name: aiops-backend
+    container_name: aiops-api
+    restart: unless-stopped
     env_file:
       - .env
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@aiops-db:5432/${POSTGRES_DB}
       - FRONTEND_DIR=/app/web
+      - TELEMETRY_API_URL=http://telemetry-api:8080
+      - TELEMETRY_INTERNAL_TOKEN=${TELEMETRY_INTERNAL_TOKEN}
+      - JWT_SECRET=${JWT_SECRET}
+      - ACCESS_TOKEN_TTL_MINUTES=${ACCESS_TOKEN_TTL_MINUTES}
+      - REFRESH_TOKEN_TTL_DAYS=${REFRESH_TOKEN_TTL_DAYS}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
     ports:
-      - "${AIOPS_API_HOST_PORT}:8000"
+      - "${AIOPS_API_HOST_PORT:-3113}:8000"
     volumes:
       - ~/.aws:/root/.aws:ro
+      - ./aiops:/app
+      # Must be the *built* output, not the raw TSX source — main.py mounts
+      # FRONTEND_DIR/assets, which only exists after `npm run build` (run
+      # inside web/ before starting the stack, and again after frontend
+      # changes; the image's own Dockerfile-built copy gets overwritten by
+      # this mount, since ./aiops:/app above replaces all of /app). For
+      # live frontend reload during active UI development, run the Vite dev
+      # server separately (`npm run dev` in web/, http://localhost:5173) —
+      # it proxies /api to this same aiops-api container.
+      - ./web/dist:/app/web:ro
+      - ./observability/logs:/var/log/shared
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       aiops-db:
         condition: service_healthy
@@ -40,19 +76,108 @@ services:
       context: .
       dockerfile: telemetry-api/Dockerfile
     container_name: telemetry-api
+    restart: unless-stopped
     env_file:
       - .env
     environment:
       - DATABASE_URL=Host=aiops-db;Port=5432;Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB}
+      - TELEMETRY_INTERNAL_TOKEN=${TELEMETRY_INTERNAL_TOKEN}
     ports:
-      - "${TELEMETRY_API_HOST_PORT}:8080"
+      - "${TELEMETRY_API_HOST_PORT:-3114}:8080"
     depends_on:
       aiops-db:
         condition: service_healthy
+    # aiops-shared also carries external sources (e.g. the standalone shopfront
+    # repo) in by container DNS name — host.docker.internal hairpin routing
+    # back into this same Podman machine isn't reliable on every setup.
+    networks: [aiops, aiops-shared]
+
+  # All three pipeline stages (poll -> summarize -> match) in one container —
+  # see orchestrator/worker.py for what that trades away (per-stage crash
+  # isolation) versus running them as three separate containers.
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    container_name: orchestrator
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@aiops-db:5432/${POSTGRES_DB}
+    volumes:
+      - ~/.aws:/root/.aws:ro
+      - orchestrator-data:/app/orchestrator/data
+      - ./observability/logs:/var/log/shared
+    depends_on:
+      aiops-db:
+        condition: service_healthy
+    command: ["python", "-m", "orchestrator.worker"]
+    networks: [aiops]
+
+  # shopfront now lives in its own repo (https://github.com/mayurkhan2/shopfront)
+  # and its own compose.yaml — it ships telemetry to this stack's telemetry-api
+  # over the host-exposed port (TELEMETRY_API_HOST_PORT), authenticated by a
+  # per-team ingestion key, rather than sharing this Docker network.
+
+  # ── Observability: one place to see logs/errors from every app service ──────
+  loki:
+    image: docker.io/grafana/loki:2.9.4
+    container_name: loki
+    restart: unless-stopped
+    ports:
+      - "${LOKI_HOST_PORT:-3115}:3100"
+    volumes:
+      - loki-data:/loki
+    networks: [aiops]
+
+  # Reads the shared log files each app service dual-writes (see SHARED_LOG_DIR
+  # in aiops-api/orchestrator) and ships them to Loki. File-based rather than
+  # Docker/Podman-socket discovery, so it works the same regardless of
+  # container runtime. shopfront now lives in its own repo/compose stack, so
+  # it's no longer part of this shared log volume.
+  promtail:
+    image: docker.io/grafana/promtail:2.9.4
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      - ./observability/promtail-config.yaml:/etc/promtail/config.yml:ro
+      - ./observability/logs:/var/log/shared:ro
+    command: ["-config.file=/etc/promtail/config.yml"]
+    depends_on:
+      - loki
+    networks: [aiops]
+
+  grafana:
+    image: docker.io/grafana/grafana:10.4.2
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_HOST_PORT:-3116}:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./observability/grafana-dashboard-provider.yaml:/etc/grafana/provisioning/dashboards/dashboard-provider.yaml:ro
+      - ./observability/dashboards:/etc/grafana/provisioning/dashboards/json:ro
+    depends_on:
+      - loki
     networks: [aiops]
 
 volumes:
   aiops-db-data:
+  pgadmin_data:
+  orchestrator-data:
+  loki-data:
+  grafana-data:
 
 networks:
   aiops:
+  # Created once with `podman network create aiops-shared` (or `docker network
+  # create`) — lets other repos/compose projects (e.g. shopfront) reach
+  # telemetry-api by container name without joining the full aiops network.
+  aiops-shared:
+    external: true

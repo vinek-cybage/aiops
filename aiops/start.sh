@@ -10,7 +10,7 @@ if [ -f "../.env" ]; then
     set +a
 fi
 
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/aiops
+export DATABASE_URL=postgresql://aiops:aiops@localhost:3111/aiops
 export FRONTEND_DIR=../web
 
 exec .venv/Scripts/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload

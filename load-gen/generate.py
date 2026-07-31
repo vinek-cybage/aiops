@@ -9,7 +9,7 @@ Usage:
   python generate.py --once --fault "Cascade Failure"
 
 Environment:
-  AIOPS_WEBHOOK  = http://localhost:8000/api/webhook/grafana
+  AIOPS_WEBHOOK  = http://localhost:3113/api/webhook/grafana
 """
 
 import argparse, json, os, random, sys, threading, time
@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
-AIOPS_WEBHOOK = os.getenv("AIOPS_WEBHOOK", "http://localhost:8000/api/webhook/grafana")
+AIOPS_WEBHOOK = os.getenv("AIOPS_WEBHOOK", "http://localhost:3113/api/webhook/grafana")
 
 SERVICES = [
     "product-service", "cart-service", "order-service",

@@ -32,7 +32,7 @@ _HERE   = os.path.dirname(os.path.abspath(__file__))
 _VENV_PY = os.path.join(_HERE, ".venv", "Scripts", "python.exe")
 PYTHON  = _VENV_PY if os.path.exists(_VENV_PY) else sys.executable
 
-AIOPS_WEBHOOK = os.getenv("AIOPS_WEBHOOK", "http://localhost:8000/api/webhook/grafana")
+AIOPS_WEBHOOK = os.getenv("AIOPS_WEBHOOK", "http://localhost:3113/api/webhook/grafana")
 
 
 def _now() -> str:
@@ -241,7 +241,7 @@ def _safe(text: str, limit: int = 0) -> str:
 
 def _print_incidents():
     try:
-        with urllib.request.urlopen("http://localhost:8000/api/incidents", timeout=5) as r:
+        with urllib.request.urlopen("http://localhost:3113/api/incidents", timeout=5) as r:
             incidents = json.loads(r.read())
     except Exception as e:
         print(f"[incidents] Could not fetch: {e}")
@@ -275,9 +275,9 @@ def _print_incidents():
 
 def _run_generate(extra_args: list[str]):
     env = os.environ.copy()
-    env.setdefault("LOKI_URL",      "http://localhost:3100")
+    env.setdefault("LOKI_URL",      "http://localhost:3115")
     env.setdefault("TEMPO_URL",     "http://localhost:4318")
-    env.setdefault("AIOPS_WEBHOOK", "http://localhost:8000/api/webhook/grafana")
+    env.setdefault("AIOPS_WEBHOOK", "http://localhost:3113/api/webhook/grafana")
     subprocess.run([PYTHON, SCRIPT] + extra_args, env=env)
 
 
@@ -352,9 +352,9 @@ def main():
 
         print(f"\n[demo] Starting load generator — fault: {fault}")
         env = os.environ.copy()
-        env.setdefault("LOKI_URL",      "http://localhost:3100")
+        env.setdefault("LOKI_URL",      "http://localhost:3115")
         env.setdefault("TEMPO_URL",     "http://localhost:4318")
-        env.setdefault("AIOPS_WEBHOOK", "http://localhost:8000/api/webhook/grafana")
+        env.setdefault("AIOPS_WEBHOOK", "http://localhost:3113/api/webhook/grafana")
 
         proc = subprocess.Popen(
             [PYTHON, SCRIPT, "--rate", "2", "--fault", fault],

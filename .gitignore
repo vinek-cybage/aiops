@@ -26,6 +26,15 @@ bin/
 obj/
 *.user
 
+# ── Node.js / npm (web/) ───────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.npm/
+.eslintcache
+
 # ── Virtual environments ───────────────────────────────────────────────────────
 .venv/
 venv/
@@ -154,3 +163,5 @@ data/
 prometheus_data/
 # Local app settings
 db/app_settings.json
+# Shared app log files scraped by Promtail (see observability/)
+observability/logs/

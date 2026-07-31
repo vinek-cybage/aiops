@@ -1,22 +1,51 @@
 import os, re, time, json, logging, urllib.request, urllib.parse
-from typing import Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s", force=True)
+_shared_log_dir = os.getenv("SHARED_LOG_DIR", "/var/log/shared")
+os.makedirs(_shared_log_dir, exist_ok=True)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s", force=True,
+                     handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(_shared_log_dir, "aiops-api.log"))])
 logger = logging.getLogger("aiops")
 
 from database import init_db
+from migrate import run_migrations
 from agent import analyze
-from incidents import save_incident, get_open_incidents, get_all_incidents, get_incident_by_id, resolve_incident
-from teams import get_all_teams, create_team, update_team, delete_team, get_all_users, get_user, create_user, delete_user
+from incidents import save_incident, get_open_incidents
+from cases import get_all_cases, get_case_by_id, resolve_case, get_case_actions, apply_action
+from teams import update_team, delete_team, get_all_users, get_user, create_user, delete_user, get_services_for_teams
+from models.user import ORG_ADMIN, PLATFORM_ADMIN, ORG_ROLES, MEMBER
+from auth.routes import router as auth_router
+from auth.dependencies import get_current_user, require_role, AuthenticatedUser
+from team_members import router as team_members_router
+from platform_admin import router as platform_admin_router
+from mcp import router as mcp_router
+from data_sources import router as data_sources_router
+from github_integration import router as github_integration_router
 
 app = FastAPI(title="AIOps POC")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-LOKI_URL  = os.getenv("LOKI_URL",  "http://loki:3100")
-TEMPO_URL = os.getenv("TEMPO_URL", "http://tempo:3200")
+_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,  # required so the httpOnly refresh-token cookie is sent/accepted
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth_router)
+app.include_router(team_members_router)
+app.include_router(platform_admin_router)
+app.include_router(mcp_router)
+app.include_router(data_sources_router)
+app.include_router(github_integration_router)
+
+LOKI_URL               = os.getenv("LOKI_URL",  "http://loki:3100")
+TELEMETRY_API_URL      = os.getenv("TELEMETRY_API_URL", "http://telemetry-api:8080")
+TELEMETRY_INTERNAL_TOKEN = os.getenv("TELEMETRY_INTERNAL_TOKEN")
 
 # ── Service catalog (built from webhook payloads, no polling) ─────────────────
 _catalog: dict = {"apps": set(), "services": set(), "last_updated": None}
@@ -52,18 +81,14 @@ def startup():
         except Exception as e: logger.warning("DB not ready (%d/10): %s", i+1, e); time.sleep(2)
     else:
         raise RuntimeError("DB unavailable after 10 attempts")
+
+    # Alembic owns all tenancy/auth schema (organizations, users.org_id/email/
+    # password_hash, team_memberships, refresh/reset tokens, ...) — runs after
+    # init_db()'s legacy CREATE TABLE IF NOT EXISTS so base tables exist first.
+    run_migrations()
+    logger.info("Migrations applied")
+
     logger.info("DB ready — catalog will populate from incoming webhooks")
-
-
-# ── auth helpers ───────────────────────────────────────────────────────────────
-def _get_user(x_user_id):
-    try: return get_user(int(x_user_id)) if x_user_id else None
-    except: return None
-
-def _admin(x_user_id):
-    u = _get_user(x_user_id)
-    if not u or u["role"] != "admin": raise HTTPException(403, "Admin access required")
-    return u
 
 
 # ── request bodies ─────────────────────────────────────────────────────────────
@@ -71,7 +96,7 @@ class TeamBody(BaseModel):
     name: str; services: list[str] = []
 
 class UserBody(BaseModel):
-    name: str; team_id: int | None = None; role: str = "member"
+    name: str; team_id: int | None = None; role: str = MEMBER
 
 
 # ── routes ─────────────────────────────────────────────────────────────────────
@@ -88,80 +113,134 @@ def catalog():
 
 
 @app.post("/api/analyze/upload")
-async def analyze_upload(file: UploadFile = File(...)):
+async def analyze_upload(file: UploadFile = File(...), user: AuthenticatedUser = Depends(get_current_user)):
     if not file.filename.endswith((".log", ".txt", ".out")):
         raise HTTPException(400, "Only .log, .txt, .out files supported")
     content = (await file.read()).decode("utf-8", errors="replace")
     if not content.strip(): raise HTTPException(400, "File is empty")
-    result = analyze(content, get_open_incidents())
-    return save_incident(result, result.get("logs", []))
+    result = analyze(content, get_open_incidents(user.org_id))
+    return save_incident(result, result.get("logs", []), user.org_id)
 
 @app.get("/api/incidents")
-def list_incidents(x_user_id: Optional[str] = Header(None)):
-    u = _get_user(x_user_id)
-    if u and u["role"] != "admin" and u.get("team_services"):
-        return get_all_incidents(services=u["team_services"])
-    return get_all_incidents()
+def list_incidents(user: AuthenticatedUser = Depends(get_current_user)):
+    # org_id (JWT) is the hard tenant boundary. Non-admins are additionally
+    # narrowed to the services of teams they actually belong to, per the JWT's
+    # own (signed, tamper-proof) team_roles — never a client-supplied header.
+    if not user.is_platform_admin and user.role != ORG_ADMIN and user.team_ids:
+        services = get_services_for_teams(user.team_ids, user.org_id)
+        if services:
+            return get_all_cases(user.org_id, services=services)
+    return get_all_cases(user.org_id)
 
 @app.get("/api/incidents/{inc_id}")
-def get_incident(inc_id: str):
-    inc = get_incident_by_id(inc_id)
+def get_incident(inc_id: str, user: AuthenticatedUser = Depends(get_current_user)):
+    inc = get_case_by_id(inc_id, user.org_id)
     if not inc: raise HTTPException(404, "Not found")
     return inc
 
 @app.patch("/api/incidents/{inc_id}/resolve")
-def resolve(inc_id: str):
-    inc = resolve_incident(inc_id)
+def resolve(inc_id: str, user: AuthenticatedUser = Depends(get_current_user)):
+    inc = resolve_case(inc_id, user.org_id)
     if not inc: raise HTTPException(404, "Not found")
     return inc
 
-@app.get("/api/teams")
-def list_teams(): return get_all_teams()
+@app.get("/api/incidents/{inc_id}/actions")
+def list_case_actions(inc_id: str, user: AuthenticatedUser = Depends(get_current_user)):
+    actions = get_case_actions(inc_id, user.org_id)
+    if actions is None: raise HTTPException(404, "Not found")
+    return actions
 
-@app.post("/api/teams", status_code=201)
-def add_team(body: TeamBody, x_user_id: Optional[str] = Header(None)):
-    _admin(x_user_id); return create_team(body.name, body.services)
+@app.post("/api/incidents/{inc_id}/actions/{action_id}/apply")
+def apply_case_action(
+    inc_id: str, action_id: int,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    actor = get_user(user.id, user.org_id)
+    result = apply_action(inc_id, action_id, user.org_id, actor["name"] if actor else None)
+    if result is None: raise HTTPException(404, "Not found")
+    if "error" in result: raise HTTPException(400, result["error"])
+    return result
 
 @app.put("/api/teams/{team_id}")
-def edit_team(team_id: int, body: TeamBody, x_user_id: Optional[str] = Header(None)):
-    _admin(x_user_id)
-    t = update_team(team_id, body.name, body.services)
+def edit_team(team_id: int, body: TeamBody, user: AuthenticatedUser = Depends(require_role(ORG_ADMIN))):
+    t = update_team(team_id, body.name, body.services, user.org_id)
     if not t: raise HTTPException(404, "Not found")
     return t
 
 @app.delete("/api/teams/{team_id}", status_code=204)
-def remove_team(team_id: int, x_user_id: Optional[str] = Header(None)):
-    _admin(x_user_id)
-    if not delete_team(team_id): raise HTTPException(404, "Not found")
+def remove_team(team_id: int, user: AuthenticatedUser = Depends(require_role(ORG_ADMIN))):
+    if not delete_team(team_id, user.org_id): raise HTTPException(404, "Not found")
 
 @app.get("/api/users")
-def list_users(): return get_all_users()
+def list_users(user: AuthenticatedUser = Depends(require_role(ORG_ADMIN))):
+    return get_all_users(user.org_id)
 
 @app.post("/api/users", status_code=201)
-def add_user(body: UserBody, x_user_id: Optional[str] = Header(None)):
-    _admin(x_user_id); return create_user(body.name, body.team_id, body.role)
+def add_user(body: UserBody, user: AuthenticatedUser = Depends(require_role(ORG_ADMIN))):
+    if body.role not in ORG_ROLES:
+        raise HTTPException(400, f"role must be one of {ORG_ROLES}")
+    if body.role == PLATFORM_ADMIN and not user.is_platform_admin:
+        raise HTTPException(403, "Only a platform_admin can create another platform_admin")
+    created = create_user(body.name, body.team_id, body.role, user.org_id)
+    if created is None:
+        raise HTTPException(400, "team_id does not belong to your organization")
+    return created
 
 @app.delete("/api/users/{user_id}", status_code=204)
-def remove_user(user_id: int, x_user_id: Optional[str] = Header(None)):
-    _admin(x_user_id)
-    if not delete_user(user_id): raise HTTPException(404, "Not found")
+def remove_user(user_id: int, user: AuthenticatedUser = Depends(require_role(ORG_ADMIN))):
+    if not delete_user(user_id, user.org_id): raise HTTPException(404, "Not found")
 
 
 # ── webhook (Grafana / Prometheus alertmanager format) ─────────────────────────
-def _alert_to_text(payload: dict) -> str:
-    lines = []
-    for alert in payload.get("alerts", [payload]):
-        lb, an = alert.get("labels", {}), alert.get("annotations", {})
-        lines += [
-            f"[ALERT] status={alert.get('status','firing')} startsAt={alert.get('startsAt','')}",
-            f"  alertname={lb.get('alertname','unknown')}",
-            f"  severity={lb.get('severity', lb.get('priority','unknown'))}",
-            f"  service={lb.get('service_name', lb.get('job','unknown'))}",
-            f"  summary={an.get('summary', an.get('message',''))}",
-            f"  description={an.get('description','')}",
-        ] + [f"  {k}={v}" for k, v in lb.items()
-             if k not in ("alertname","severity","priority","service_name","job")]
-    return "\n".join(lines)
+def _slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_") or "alert"
+
+
+_LOG_LINE_RE = re.compile(r"^\S+\s+\S+\s+(\S+)\s+\[([^\]]+)\]\s+(.*)$")
+
+def _parse_log_line(line: str, event: str) -> dict | None:
+    """Parses '<date> <time> <LEVEL> [<service>] <message> | k=v | ... | trace_id=<hex>'
+    (the log-line format documented in README.md) into telemetry-api's LogEntry shape."""
+    head, *kv_parts = line.split(" | ")
+    m = _LOG_LINE_RE.match(head)
+    if not m:
+        return None
+    level, service, message = m.group(1), m.group(2), m.group(3)
+    context, trace_id = {}, None
+    for kv in kv_parts:
+        if "=" not in kv:
+            continue
+        k, _, v = kv.partition("=")
+        k, v = k.strip(), v.strip()
+        context[k] = v
+        if k == "trace_id":
+            trace_id = v
+    return {"service": service, "level": level, "event": event,
+            "traceId": trace_id, "message": message, "context": context or None}
+
+
+def _bridge_logs_to_telemetry(log_lines: list[str], alertname: str | None):
+    """Writes parsed log lines into the shared aiops-db via telemetry-api's
+    POST /api/logs, so orchestrator's Stage 1 poller (which only reads the
+    logs/metrics tables) sees fault data on its next tick — load-gen itself
+    never calls telemetry-api directly, it only fires this webhook."""
+    event = _slugify(alertname) if alertname else "alert"
+    entries = [e for line in log_lines if (e := _parse_log_line(line, event))]
+    if not entries:
+        return
+    headers = {"Content-Type": "application/json"}
+    if TELEMETRY_INTERNAL_TOKEN:
+        headers["X-Internal-Token"] = TELEMETRY_INTERNAL_TOKEN
+    req = urllib.request.Request(
+        f"{TELEMETRY_API_URL}/api/logs",
+        data=json.dumps(entries).encode(),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as r:
+        r.read()
+    logger.info("Bridged %d log line(s) to telemetry-api", len(entries))
+
 
 def _fetch_loki_logs(lookback: int = 120, limit: int = 100, trace_id: str = None, service: str = None) -> str:
     """Fetch logs from Loki. If trace_id given, fetch logs for that specific trace.
@@ -189,47 +268,6 @@ def _fetch_loki_logs(lookback: int = 120, limit: int = 100, trace_id: str = None
         logger.warning("Loki fetch failed: %s", e); return ""
 
 
-def _fetch_tempo_trace(trace_id: str) -> str:
-    """Fetch full trace from Tempo and format spans as readable context for LLM."""
-    try:
-        with urllib.request.urlopen(f"{TEMPO_URL}/api/traces/{trace_id}", timeout=5) as r:
-            data = json.loads(r.read())
-        lines = [f"TRACE {trace_id}:"]
-        for batch in data.get("batches", []):
-            svc = next((a["value"]["stringValue"] for a in batch.get("resource", {}).get("attributes", [])
-                        if a["key"] == "service.name"), "unknown")
-            for span in batch.get("scopeSpans", [{}])[0].get("spans", []):
-                name     = span.get("name", "")
-                status   = span.get("status", {})
-                dur_ns   = int(span.get("endTimeUnixNano", 0)) - int(span.get("startTimeUnixNano", 0))
-                dur_ms   = round(dur_ns / 1e6, 1)
-                err      = status.get("code") == 2 or status.get("message", "")
-                attrs    = {a["key"]: a.get("value", {}).get("stringValue", a.get("value", {}).get("intValue", ""))
-                            for a in span.get("attributes", [])}
-                err_flag = " [ERROR]" if err else ""
-                attr_str = " | ".join(f"{k}={v}" for k, v in attrs.items() if k not in ("http.method",))
-                lines.append(f"  [{svc}] {name}{err_flag} duration={dur_ms}ms {attr_str}".rstrip())
-        return "\n".join(lines)
-    except Exception as e:
-        logger.warning("Tempo trace fetch failed for %s: %s", trace_id, e); return ""
-
-
-def _fetch_recent_traces_for_service(service: str, limit: int = 3) -> list[str]:
-    """Find recent trace IDs for a service from Tempo search."""
-    try:
-        params = urllib.parse.urlencode({"service.name": service, "limit": limit})
-        with urllib.request.urlopen(f"{TEMPO_URL}/api/search?{params}", timeout=5) as r:
-            data = json.loads(r.read())
-        return [t["traceID"] for t in data.get("traces", [])]
-    except Exception as e:
-        logger.warning("Tempo search failed: %s", e); return []
-
-
-def _extract_trace_ids(text: str) -> list[str]:
-    """Extract trace_id values from log lines."""
-    return list(dict.fromkeys(re.findall(r"trace_id=([a-f0-9]{16,32})", text)))
-
-
 def _process_webhook(payload: dict):
     firing = [a for a in payload.get("alerts", [payload]) if a.get("status", "firing") == "firing"]
     if not firing:
@@ -237,32 +275,25 @@ def _process_webhook(payload: dict):
 
     alert_service = None
     alert_app = None
+    alertname = None
     for a in firing:
         lb = a.get("labels", {})
         alert_service = lb.get("service_name") or lb.get("service") or None
         alert_app     = lb.get("app") or lb.get("job") or None
+        alertname     = alertname or lb.get("alertname")
         if alert_service:
             break
     _catalog_add(alert_app, alert_service)
 
-    alert_text = _alert_to_text(payload)
-    context    = alert_text
+    # If payload includes inline context (mock mode, used by load-gen), use it directly.
+    inline_logs = payload.get("context", {}).get("logs", [])
 
-    # If payload includes inline context (mock mode), use it directly — no Loki/Tempo needed
-    inline = payload.get("context", {})
-    inline_logs   = "\n".join(inline.get("logs",   []))
-    inline_traces = "\n".join(inline.get("traces", []))
-
-    if inline_logs or inline_traces:
-        if inline_logs:
-            context += f"\n\n[LOGS — service={alert_service or 'all'}]\n{inline_logs}"
-        if inline_traces:
-            context += f"\n\n[TRACES]\n{inline_traces}"
-        logger.info("Webhook (inline context): %d alerts | service=%s | %d log lines | %d trace lines",
-                    len(firing), alert_service, inline_logs.count('\n') + 1 if inline_logs else 0,
-                    inline_traces.count('\n') + 1 if inline_traces else 0)
+    if inline_logs:
+        log_lines = inline_logs
+        logger.info("Webhook (inline context): %d alerts | service=%s | %d log lines",
+                    len(firing), alert_service, len(log_lines))
     else:
-        # Live mode — fetch from Loki and Tempo
+        # Live mode — fetch from Loki
         label_trace_id = None
         for a in firing:
             label_trace_id = a.get("labels", {}).get("trace_id")
@@ -273,28 +304,17 @@ def _process_webhook(payload: dict):
             loki_logs = _fetch_loki_logs(lookback=90, limit=50, trace_id=label_trace_id)
             if not loki_logs:
                 loki_logs = _fetch_loki_logs(lookback=90, limit=50, service=alert_service)
-            trace_ids = [label_trace_id]
         else:
             loki_logs = _fetch_loki_logs(lookback=300, limit=50, service=alert_service)
-            trace_ids = _extract_trace_ids(loki_logs)
-            if not trace_ids and alert_service:
-                trace_ids = _fetch_recent_traces_for_service(alert_service, limit=2)
 
-        trace_sections = [t for tid in trace_ids[:2] if (t := _fetch_tempo_trace(tid))]
+        log_lines = loki_logs.splitlines() if loki_logs else []
+        logger.info("Webhook (live): %d alerts | service=%s | %d log lines",
+                    len(firing), alert_service, len(log_lines))
 
-        if loki_logs:
-            context += f"\n\n[LOKI LOGS — service={alert_service or 'all'}, last 5min]\n{loki_logs}"
-        if trace_sections:
-            context += f"\n\n[TEMPO TRACES — {len(trace_sections)} traces]\n" + "\n\n".join(trace_sections)
-
-        logger.info("Webhook (live): %d alerts | service=%s | %d log lines | %d traces",
-                    len(firing), alert_service, loki_logs.count('\n') + 1 if loki_logs else 0, len(trace_sections))
     try:
-        result = analyze(context, get_open_incidents())
-        saved  = save_incident(result, result.get("logs", []))
-        logger.info("Incident %s (%s)", saved["incident"]["inc_id"], saved["action"])
+        _bridge_logs_to_telemetry(log_lines, alertname)
     except Exception:
-        logger.exception("Webhook processing failed")
+        logger.exception("Webhook -> telemetry-api bridge failed")
 
 
 @app.post("/api/webhook/grafana", status_code=202)
@@ -311,4 +331,16 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 
 _frontend = os.getenv("FRONTEND_DIR", "/app/web")
-app.mount("/", StaticFiles(directory=_frontend, html=True), name="frontend")
+app.mount("/assets", StaticFiles(directory=os.path.join(_frontend, "assets")), name="frontend-assets")
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    # React Router uses real browser paths (/app/dashboard, /login, ...) — a
+    # plain StaticFiles(html=True) mount only auto-serves index.html for "/",
+    # so a hard refresh on any other client-side route would 404 without this
+    # catch-all. Must stay registered last so it never shadows /api/* routes.
+    candidate = os.path.join(_frontend, full_path)
+    if full_path and os.path.isfile(candidate):
+        return FileResponse(candidate)
+    return FileResponse(os.path.join(_frontend, "index.html"))

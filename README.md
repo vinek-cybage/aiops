@@ -22,10 +22,14 @@ telemetry-api  (.NET 8 minimal API)
   │  POST /api/logs | /api/traces | /api/metrics
   └─ writes logs/traces/metrics into the same aiops-db
 
-Containers:
-  aiops-db    :5432 — shared Postgres (incidents + teams/users + telemetry)
-  aiops-backend :8000 — Python FastAPI backend + web UI
-  telemetry-api :5080 — .NET logs/traces/metrics ingestion API
+Containers (host ports live in the 3111-3116 range to avoid clashing with
+whatever else already holds the conventional defaults on this machine):
+  aiops-db      :3111 — shared Postgres (incidents + teams/users + telemetry)
+  aiops-pgadmin :3112 — Postgres admin UI
+  aiops-backend :3113 — Python FastAPI backend + web UI
+  telemetry-api :3114 — .NET logs/traces/metrics ingestion API
+  loki          :3115 — log aggregation
+  grafana       :3116 — dashboards over Loki
 
 LLM call observability (prompts, completions, latency, tokens) goes to
 Langfuse Cloud (https://cloud.langfuse.com) — not a local container.
@@ -50,7 +54,13 @@ The container mounts `~/.aws` read-only so it can reuse this cached SSO session 
 podman compose restart aiops-backend
 ```
 
-### 3. Start all containers
+### 3. Build the frontend
+```bash
+cd web && npm install && npm run build && cd ..
+```
+`compose.yaml` mounts `web/dist` (the built output) into the `aiops-api` container — it does **not** serve the raw TSX source. Re-run this after every frontend change; otherwise `aiops-api` will fail to start (`main.py` mounts `FRONTEND_DIR/assets`, which only exists post-build). For live-reloading frontend development instead, skip this and run `npm run dev` in `web/` (`http://localhost:5173`) — it proxies `/api` to the same backend.
+
+### 4. Start all containers
 ```bash
 podman compose up -d --build
 ```
@@ -58,11 +68,13 @@ Run this from the project root — `compose.yaml` and `.env` both live there now
 
 This builds and starts everything: `aiops-db`, `aiops-backend` (Python), and `telemetry-api` (.NET).
 
-- AIOps UI: `http://localhost:8000`
-- Telemetry API: `http://localhost:5080/api/health`
+- AIOps UI: `http://localhost:3113`
+- Telemetry API: `http://localhost:3114/api/health`
+- Grafana: `http://localhost:3116`
+- pgAdmin: `http://localhost:3112`
 - Langfuse (LLM call traces): `https://cloud.langfuse.com` — hosted, not part of this stack
 
-### 3. Run a scenario (second terminal)
+### 5. Run a scenario (second terminal)
 ```bash
 cd load-gen
 
@@ -333,7 +345,10 @@ Hackathon/
 
 | Service | URL | Purpose |
 |---|---|---|
-| AIOps UI | `http://localhost:8000` | Incident dashboard |
-| Telemetry API | `http://localhost:5080` | .NET logs/traces/metrics ingestion |
-| aiops-db (Postgres) | `localhost:5432` | Shared DB — incidents, teams/users, telemetry |
+| AIOps UI | `http://localhost:3113` | Incident dashboard |
+| pgAdmin | `http://localhost:3112` | Postgres admin UI |
+| Telemetry API | `http://localhost:3114` | .NET logs/traces/metrics ingestion |
+| aiops-db (Postgres) | `localhost:3111` | Shared DB — incidents, teams/users, telemetry |
+| Loki | `localhost:3115` | Log aggregation |
+| Grafana | `http://localhost:3116` | Dashboards over Loki |
 | Langfuse | `https://cloud.langfuse.com` | LLM call traces (hosted, not part of this stack) |

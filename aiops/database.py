@@ -46,11 +46,61 @@ def init_db():
     for col in ("duplicate_of", "cascade_of"):
         cur.execute(f"ALTER TABLE incidents DROP COLUMN IF EXISTS {col};")
 
-    # Seed default admin user if not present
-    cur.execute("""
-        INSERT INTO users (name, team_id, role) VALUES ('Admin', NULL, 'admin')
-        ON CONFLICT (name) DO NOTHING;
-    """)
+    # NOTE: the default-admin seed insert that used to live here has moved —
+    # organizations/users now carry auth columns (org_id/email/password_hash)
+    # owned by the Alembic migrations in alembic/versions/, which also seed the
+    # "Default Org" tenant. The first real admin account is created via
+    # POST /api/auth/register instead of a hardcoded seed row.
 
     conn.commit()
     cur.close(); conn.close()
+
+
+# ── shared telemetry tables (owned/written by telemetry-api, same DB) ──────────
+# These tables (metrics, logs, cases, alerts) aren't created here — telemetry-api
+# creates them on startup. Queries are read-only and fail soft if the tables
+# aren't there yet (e.g. telemetry-api hasn't started for the first time).
+
+def get_recent_logs(service: str | None = None, limit: int = 20) -> list[dict]:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT ts, service, level, event, trace_id, message, context
+        FROM logs
+        WHERE %(service)s IS NULL OR service = %(service)s
+        ORDER BY ts DESC LIMIT %(limit)s
+    """, {"service": service, "limit": limit})
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return rows
+
+
+def get_recent_metrics(service: str | None = None, limit: int = 20) -> list[dict]:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT ts, service, error_rate, p99_latency_ms, active_connections, rss_mb
+        FROM metrics
+        WHERE %(service)s IS NULL OR service = %(service)s
+        ORDER BY ts DESC LIMIT %(limit)s
+    """, {"service": service, "limit": limit})
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return rows
+
+
+def get_open_cases_for_service(service: str | None = None, limit: int = 5) -> list[dict]:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT c.id, c.status, c.primary_service, c.opened_at, c.updated_at,
+               COALESCE(json_agg(json_build_object(
+                   'source_tool', a.source_tool, 'metric', a.metric,
+                   'severity', a.severity, 'triggered_at', a.triggered_at
+               )) FILTER (WHERE a.id IS NOT NULL), '[]') AS alerts
+        FROM cases c
+        LEFT JOIN alerts a ON a.case_id = c.id
+        WHERE c.status != 'RESOLVED' AND (%(service)s IS NULL OR c.primary_service = %(service)s)
+        GROUP BY c.id
+        ORDER BY c.opened_at DESC LIMIT %(limit)s
+    """, {"service": service, "limit": limit})
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return rows
