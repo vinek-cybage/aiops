@@ -7,6 +7,7 @@ services:
       - .env
     volumes:
       - aiops-db-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "${POSTGRES_HOST_PORT:-3111}:5432"
     healthcheck:
@@ -15,169 +16,123 @@ services:
       retries: 10
     networks: [aiops]
 
-  aiops-pgadmin:
-    image: docker.io/dpage/pgadmin4:latest
-    container_name: pgadmin4
+  neo4j:
+    image: neo4j:5-community
+    container_name: neo4j
     restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@admin.com
-      PGADMIN_DEFAULT_PASSWORD: admin
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-aiops123456}
     ports:
-      - "${PGADMIN_HOST_PORT:-3112}:80"
+      - "${NEO4J_HTTP_HOST_PORT:-3118}:7474"
+      - "${NEO4J_BOLT_HOST_PORT:-3119}:7687"
     volumes:
-      - pgadmin_data:/var/lib/pgadmin
-    depends_on:
-      - aiops-db
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 5s
+      retries: 10
     networks: [aiops]
 
-  # Python (FastAPI) — incident analysis backend + frontend static files.
-  aiops-api:
+  orders-service:
     build:
       context: .
-      dockerfile: aiops/Dockerfile
-    container_name: aiops-api
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@aiops-db:5432/${POSTGRES_DB}
-      - FRONTEND_DIR=/app/web
-      - TELEMETRY_API_URL=http://telemetry-api:8080
-      - TELEMETRY_INTERNAL_TOKEN=${TELEMETRY_INTERNAL_TOKEN}
-      - JWT_SECRET=${JWT_SECRET}
-      - ACCESS_TOKEN_TTL_MINUTES=${ACCESS_TOKEN_TTL_MINUTES}
-      - REFRESH_TOKEN_TTL_DAYS=${REFRESH_TOKEN_TTL_DAYS}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
-      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
-    ports:
-      - "${AIOPS_API_HOST_PORT:-3113}:8000"
-    volumes:
-      - ~/.aws:/root/.aws:ro
-      - ./aiops:/app
-      # Must be the *built* output, not the raw TSX source — main.py mounts
-      # FRONTEND_DIR/assets, which only exists after `npm run build` (run
-      # inside web/ before starting the stack, and again after frontend
-      # changes; the image's own Dockerfile-built copy gets overwritten by
-      # this mount, since ./aiops:/app above replaces all of /app). For
-      # live frontend reload during active UI development, run the Vite dev
-      # server separately (`npm run dev` in web/, http://localhost:5173) —
-      # it proxies /api to this same aiops-api container.
-      - ./web/dist:/app/web:ro
-      - ./observability/logs:/var/log/shared
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
-    depends_on:
-      aiops-db:
-        condition: service_healthy
-    networks: [aiops]
-
-  # .NET (minimal API) — ingests logs/traces/metrics into the shared aiops-db.
-  telemetry-api:
-    build:
-      context: .
-      dockerfile: telemetry-api/Dockerfile
-    container_name: telemetry-api
-    restart: unless-stopped
+      dockerfile: services/orders-service/Dockerfile
+    container_name: orders-service
     env_file:
       - .env
     environment:
       - DATABASE_URL=Host=aiops-db;Port=5432;Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB}
-      - TELEMETRY_INTERNAL_TOKEN=${TELEMETRY_INTERNAL_TOKEN}
+      - ORDERS_SERVICE_PORT=8081
+      - PAYMENTS_SERVICE_HOST=payments-service
+      - PAYMENTS_SERVICE_PORT=8082
     ports:
-      - "${TELEMETRY_API_HOST_PORT:-3114}:8080"
+      - "${ORDERS_SERVICE_HOST_PORT:-3114}:8081"
     depends_on:
       aiops-db:
         condition: service_healthy
-    # aiops-shared also carries external sources (e.g. the standalone shopfront
-    # repo) in by container DNS name — host.docker.internal hairpin routing
-    # back into this same Podman machine isn't reliable on every setup.
-    networks: [aiops, aiops-shared]
+      # aiops-api:
+      #   condition: service_healthy
+    networks: [aiops]
 
-  # All three pipeline stages (poll -> summarize -> match) in one container —
-  # see orchestrator/worker.py for what that trades away (per-stage crash
-  # isolation) versus running them as three separate containers.
-  orchestrator:
+  payments-service:
     build:
       context: .
-      dockerfile: orchestrator/Dockerfile
-    container_name: orchestrator
+      dockerfile: services/payments-service/Dockerfile
+    container_name: payments-service
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=Host=aiops-db;Port=5432;Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB}
+    ports:
+      - "${PAYMENTS_SERVICE_HOST_PORT:-3115}:8082"
+    depends_on:
+      aiops-db:
+        condition: service_healthy
+    networks: [aiops]
+
+  log-viewer:
+    build:
+      context: .
+      dockerfile: log-viewer/Dockerfile
+    container_name: log-viewer
     restart: unless-stopped
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@aiops-db:5432/${POSTGRES_DB}
-    volumes:
-      - ~/.aws:/root/.aws:ro
-      - orchestrator-data:/app/orchestrator/data
-      - ./observability/logs:/var/log/shared
+      - POSTGRES_HOST=aiops-db
+      - POSTGRES_HOST_PORT=5432
+      - NEO4J_URI=bolt://neo4j:7687
     depends_on:
       aiops-db:
         condition: service_healthy
-    command: ["python", "-m", "orchestrator.worker"]
+      neo4j:
+        condition: service_healthy
     networks: [aiops]
 
-  # shopfront now lives in its own repo (https://github.com/mayurkhan2/shopfront)
-  # and its own compose.yaml — it ships telemetry to this stack's telemetry-api
-  # over the host-exposed port (TELEMETRY_API_HOST_PORT), authenticated by a
-  # per-team ingestion key, rather than sharing this Docker network.
-
-  # ── Observability: one place to see logs/errors from every app service ──────
-  loki:
-    image: docker.io/grafana/loki:2.9.4
-    container_name: loki
+  # Standalone log-viewer UI — same incidents/metrics/graph data as
+  # /api/log-viewer/* on aiops-api, served by its own small read-only API +
+  # frontend (kept alongside the aiops-api integration, not a replacement).
+  log-viewer-api:
+    build:
+      context: .
+      dockerfile: log-viewer-ui/api/Dockerfile
+    container_name: log-viewer-api
     restart: unless-stopped
-    ports:
-      - "${LOKI_HOST_PORT:-3115}:3100"
-    volumes:
-      - loki-data:/loki
-    networks: [aiops]
-
-  # Reads the shared log files each app service dual-writes (see SHARED_LOG_DIR
-  # in aiops-api/orchestrator) and ships them to Loki. File-based rather than
-  # Docker/Podman-socket discovery, so it works the same regardless of
-  # container runtime. shopfront now lives in its own repo/compose stack, so
-  # it's no longer part of this shared log volume.
-  promtail:
-    image: docker.io/grafana/promtail:2.9.4
-    container_name: promtail
-    restart: unless-stopped
-    volumes:
-      - ./observability/promtail-config.yaml:/etc/promtail/config.yml:ro
-      - ./observability/logs:/var/log/shared:ro
-    command: ["-config.file=/etc/promtail/config.yml"]
-    depends_on:
-      - loki
-    networks: [aiops]
-
-  grafana:
-    image: docker.io/grafana/grafana:10.4.2
-    container_name: grafana
-    restart: unless-stopped
-    ports:
-      - "${GRAFANA_HOST_PORT:-3116}:3000"
+    env_file:
+      - .env
     environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-      - GF_AUTH_DISABLE_LOGIN_FORM=true
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
-      - ./observability/grafana-dashboard-provider.yaml:/etc/grafana/provisioning/dashboards/dashboard-provider.yaml:ro
-      - ./observability/dashboards:/etc/grafana/provisioning/dashboards/json:ro
+      - POSTGRES_HOST=aiops-db
+      - POSTGRES_HOST_PORT=5432
+      - NEO4J_URI=bolt://neo4j:7687
+    ports:
+      - "${LOG_VIEWER_API_HOST_PORT:-3120}:8000"
     depends_on:
-      - loki
+      aiops-db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
     networks: [aiops]
+
+  log-viewer-web:
+    build:
+      context: .
+      dockerfile: log-viewer-ui/web/Dockerfile
+    container_name: log-viewer-web
+    restart: unless-stopped
+    environment:
+      - VITE_API_PROXY_TARGET=http://log-viewer-api:8000
+    ports:
+      - "${LOG_VIEWER_WEB_HOST_PORT:-3121}:4000"
+    depends_on:
+      - log-viewer-api
+    networks: [aiops]
+
 
 volumes:
   aiops-db-data:
-  pgadmin_data:
-  orchestrator-data:
-  loki-data:
-  grafana-data:
+  neo4j-data:
+  neo4j-logs:
 
 networks:
   aiops:
-  # Created once with `podman network create aiops-shared` (or `docker network
-  # create`) — lets other repos/compose projects (e.g. shopfront) reach
-  # telemetry-api by container name without joining the full aiops network.
-  aiops-shared:
-    external: true

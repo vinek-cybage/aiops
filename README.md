@@ -18,16 +18,11 @@ aiops  (FastAPI + Claude via Bedrock)
   │  calls LLM to analyze
   └─ saves incident to PostgreSQL (aiops-db)
 
-telemetry-api  (.NET 8 minimal API)
-  │  POST /api/logs | /api/traces | /api/metrics
-  └─ writes logs/traces/metrics into the same aiops-db
-
 Containers (host ports live in the 3111-3116 range to avoid clashing with
 whatever else already holds the conventional defaults on this machine):
   aiops-db      :3111 — shared Postgres (incidents + teams/users + telemetry)
   aiops-pgadmin :3112 — Postgres admin UI
   aiops-backend :3113 — Python FastAPI backend + web UI
-  telemetry-api :3114 — .NET logs/traces/metrics ingestion API
   loki          :3115 — log aggregation
   grafana       :3116 — dashboards over Loki
 
@@ -66,13 +61,20 @@ podman compose up -d --build
 ```
 Run this from the project root — `compose.yaml` and `.env` both live there now, so compose picks up `.env` automatically with no extra flags.
 
-This builds and starts everything: `aiops-db`, `aiops-backend` (Python), and `telemetry-api` (.NET).
+This builds and starts everything: `aiops-db`, `aiops-backend` (Python), and the observability stack.
 
 - AIOps UI: `http://localhost:3113`
-- Telemetry API: `http://localhost:3114/api/health`
 - Grafana: `http://localhost:3116`
 - pgAdmin: `http://localhost:3112`
 - Langfuse (LLM call traces): `https://cloud.langfuse.com` — hosted, not part of this stack
+
+#### Default login (AIOps UI)
+A default admin account is seeded automatically on every fresh install (Alembic migration `0001`, attached to the pre-seeded "Default Org"):
+```
+email:    admin@cybage.com
+password: admin@123
+```
+**Dev/demo credentials only** — same spirit as the dev-only `JWT_SECRET`/`CREDENTIAL_ENCRYPTION_KEY` defaults in `.env.example`. This password is public (it's in git), so change it (or delete the account and register a real one via `POST /api/auth/register` / the UI's register page) before any real or shared deployment.
 
 ### 5. Run a scenario (second terminal)
 ```bash
@@ -306,7 +308,7 @@ After the LLM processes the webhook, an incident is saved with:
 
 ```
 Hackathon/
-├── compose.yaml          — aiops-db, aiops-backend, telemetry-api
+├── compose.yaml          — aiops-db, aiops-backend, orchestrator, orders/payments-service
 ├── .env                  — AWS/Bedrock + Langfuse Cloud keys, shared by all services (never commit)
 ├── .env.example
 ├── .gitignore            — single project-wide gitignore
@@ -317,11 +319,6 @@ Hackathon/
 │   ├── demo.py           — CLI: normal / fault / once / run / list
 │   ├── requirements.txt  — only: requests
 │   └── .venv/            — Python venv (used only if running load-gen locally)
-│
-├── telemetry-api/         — .NET 8 minimal API (logs/traces/metrics → aiops-db)
-│   ├── Program.cs
-│   ├── telemetry-api.csproj
-│   └── Dockerfile         — build context is the project root
 │
 ├── web/                   — served by aiops-backend at "/" (FRONTEND_DIR)
 │   ├── index.html

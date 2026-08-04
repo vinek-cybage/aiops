@@ -54,13 +54,11 @@ venv.bak/
 *.db
 *.sqlite
 *.sqlite3
-db/
 db/*.db
 db/*.json
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
-logs/
 *.out
 
 # ── Testing / coverage ────────────────────────────────────────────────────────
@@ -163,5 +161,9 @@ data/
 prometheus_data/
 # Local app settings
 db/app_settings.json
-# Shared app log files scraped by Promtail (see observability/)
-observability/logs/
+# Shared app log files scraped by Promtail (see observability/) — keep the
+# directory itself tracked (via .gitkeep) so it exists on a fresh clone;
+# Docker Desktop on Windows/WSL2 can't auto-create bind-mount source dirs
+# the way native Linux does, so a missing dir here fails `docker compose up`.
+observability/logs/*
+!observability/logs/.gitkeep

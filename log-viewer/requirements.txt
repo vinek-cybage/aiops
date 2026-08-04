@@ -1,0 +1,6 @@
+psycopg2-binary
+drain3
+boto3
+faiss-cpu
+numpy
+neo4j

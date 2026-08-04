@@ -1,4 +1,0 @@
-psycopg2-binary
-boto3
-faiss-cpu
-numpy
