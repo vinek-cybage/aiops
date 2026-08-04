@@ -34,6 +34,7 @@ import argparse
 from drain3 import TemplateMiner
 from drain3.template_miner_config import TemplateMinerConfig
 
+import llm
 import neo4j_store
 import postgres_store
 from embeddings import embed_text, EMBEDDING_DIM
@@ -134,7 +135,13 @@ def process_log(pg_conn, log_id, ts, service, level, event, trace_id, message):
     cluster_to_incident[key] = idx
     incident = store.get(idx)
 
-    postgres_store.insert_incident(pg_conn, inc_id, title, log_entry)
+    try:
+        ai_summary = llm.summarize_incident(title, [service], 1, message)
+    except Exception as e:
+        print(f"[llm] summary failed: {e}")
+        ai_summary = None
+
+    postgres_store.insert_incident(pg_conn, inc_id, title, log_entry, ai_summary=ai_summary)
     
     neo4j_store.upsert_service(service)
     neo4j_store.upsert_incident(
@@ -146,6 +153,21 @@ def process_log(pg_conn, log_id, ts, service, level, event, trace_id, message):
     neo4j_store.link_best_relation(inc_id, service, log_entry["ts"], vector)
 
     return "NEW", incident, None
+
+
+def _sync_resolved(pg_conn):
+    """Sync resolved incidents from Postgres into the in-memory FAISS store.
+    Called every poll cycle so the worker picks up resolutions made via the API."""
+    global cluster_to_incident
+    cur = pg_conn.cursor()
+    cur.execute("SELECT inc_id FROM incidents WHERE status = 'resolved'")
+    resolved_ids = {row[0] for row in cur.fetchall()}
+    cur.close()
+    for idx, inc in enumerate(store.incidents):
+        if inc["incident_id"] in resolved_ids and idx not in store._resolved:
+            store.resolve(idx)
+            cluster_to_incident = {k: v for k, v in cluster_to_incident.items() if v != idx}
+            print(f"[resolve] cleared {inc['incident_id']} from FAISS — will reopen as new incident if fault recurs")
 
 
 def print_incidents():
@@ -188,6 +210,7 @@ def main():
             rows = fetch_new_logs(last_id, service=args.service, level=args.level)
 
             if rows:
+                _sync_resolved(pg_conn)
                 for log_id, ts, service, level, event, trace_id, message in rows:
                     decision, incident, score = process_log(
                         pg_conn, log_id, ts, service, level, event, trace_id, message

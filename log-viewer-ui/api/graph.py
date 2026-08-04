@@ -12,9 +12,19 @@ NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "aiops123456")
 _driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 
+def resolve_incident(incident_id: str):
+    with _driver.session() as session:
+        session.run(
+            "MATCH (i:Incident {incident_id: $iid}) SET i.status = 'resolved'",
+            iid=incident_id,
+        )
+
+
 def get_graph():
     with _driver.session() as session:
-        nodes = [dict(r["i"]) for r in session.run("MATCH (i:Incident) RETURN i")]
+        _skip = {"vector"}
+        nodes = [{k: v for k, v in dict(r["i"]).items() if k not in _skip}
+                 for r in session.run("MATCH (i:Incident) RETURN i")]
         edges = [
             {
                 "source": r["a"]["incident_id"],

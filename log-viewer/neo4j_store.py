@@ -197,6 +197,14 @@ def link_best_relation(new_iid, new_service, new_ts_iso, new_vector):
 
     _incident_meta[new_iid] = {"service": new_service, "first_seen": str(new_ts_iso), "vector": new_vector}
 
+def resolve_incident(incident_id: str):
+    """Mark an incident as resolved in the graph."""
+    _run(
+        "MATCH (i:Incident {incident_id: $iid}) SET i.status = 'resolved'",
+        iid=incident_id,
+    )
+
+
 def close():
     """Close the Neo4j driver connection."""
     _driver.close()

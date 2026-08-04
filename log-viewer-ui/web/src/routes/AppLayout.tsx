@@ -10,7 +10,6 @@ const DRAWER_WIDTH = 220;
 const NAV_ITEMS = [
   { label: "Dashboard", to: "/dashboard" },
   { label: "Incidents", to: "/incidents" },
-  { label: "Graph", to: "/graph" },
 ];
 
 export function AppLayout() {

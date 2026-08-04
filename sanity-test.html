@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIOps Log Viewer — Sanity Test</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { color: #94a3b8; font-size: 0.85rem; margin-bottom: 28px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .card {
+      background: #1e2330;
+      border: 1px solid #2d3548;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid #2d3548;
+      background: #171c28;
+    }
+
+    .card-title { font-size: 0.8rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #94a3b8; }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      letter-spacing: 0.03em;
+    }
+    .badge-pending  { background: #2d3548; color: #94a3b8; }
+    .badge-running  { background: #1e3a5f; color: #60a5fa; }
+    .badge-ok       { background: #14532d; color: #4ade80; }
+    .badge-error    { background: #4c1d1d; color: #f87171; }
+
+    .card-body { padding: 14px 16px; }
+
+    .endpoint-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .endpoint-row:last-child { margin-bottom: 0; }
+
+    .method {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .method-get  { background: #164e63; color: #67e8f9; }
+    .method-post { background: #3b1f6e; color: #c4b5fd; }
+
+    .endpoint-info { flex: 1; min-width: 0; }
+    .endpoint-path { font-size: 0.8rem; font-family: "Cascadia Code", "Fira Code", monospace; color: #e2e8f0; }
+    .endpoint-status { font-size: 0.75rem; margin-top: 3px; color: #64748b; }
+    .endpoint-status.ok    { color: #4ade80; }
+    .endpoint-status.error { color: #f87171; }
+
+    .dot {
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      margin-right: 5px;
+      vertical-align: middle;
+    }
+    .dot-pending { background: #475569; }
+    .dot-running { background: #60a5fa; animation: pulse 1s infinite; }
+    .dot-ok      { background: #4ade80; }
+    .dot-error   { background: #f87171; }
+
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .stat-box {
+      background: #171c28;
+      border: 1px solid #2d3548;
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .stat-label { font-size: 0.7rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-value { font-size: 1.5rem; font-weight: 700; color: #e2e8f0; margin-top: 2px; }
+
+    .incidents-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .incidents-table th {
+      text-align: left;
+      padding: 6px 10px;
+      color: #64748b;
+      font-weight: 600;
+      border-bottom: 1px solid #2d3548;
+      white-space: nowrap;
+    }
+    .incidents-table td { padding: 7px 10px; border-bottom: 1px solid #1e2330; vertical-align: top; }
+    .incidents-table tr:last-child td { border-bottom: none; }
+    .incidents-table tr:hover td { background: #1a2035; }
+
+    .severity { font-size: 0.68rem; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
+    .sev-critical { background: #4c1d1d; color: #f87171; }
+    .sev-high     { background: #431a04; color: #fb923c; }
+    .sev-medium   { background: #422006; color: #fbbf24; }
+    .sev-low      { background: #14291a; color: #4ade80; }
+
+    .status-chip { font-size: 0.68rem; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+    .st-open     { background: #1e3a5f; color: #60a5fa; }
+    .st-resolved { background: #14532d; color: #4ade80; }
+
+    .raw-block {
+      background: #0d1117;
+      border: 1px solid #2d3548;
+      border-radius: 6px;
+      padding: 12px;
+      font-family: "Cascadia Code", "Fira Code", monospace;
+      font-size: 0.72rem;
+      color: #94a3b8;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
+    .run-btn {
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 7px;
+      padding: 9px 22px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .run-btn:hover { background: #1d4ed8; }
+    .run-btn:disabled { background: #1e3a5f; color: #60a5fa; cursor: not-allowed; }
+
+    .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 24px; }
+    .base-input {
+      background: #1e2330;
+      border: 1px solid #2d3548;
+      border-radius: 7px;
+      color: #e2e8f0;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      width: 240px;
+    }
+    .base-input:focus { outline: none; border-color: #3b82f6; }
+
+    .summary-bar {
+      display: flex; gap: 16px; align-items: center;
+      background: #1e2330; border: 1px solid #2d3548;
+      border-radius: 8px; padding: 10px 18px;
+      margin-bottom: 24px; font-size: 0.8rem; flex-wrap: wrap;
+    }
+    .summary-bar .item { display: flex; align-items: center; gap: 6px; }
+    .summary-bar strong { font-size: 1.1rem; }
+
+    .section-title { font-size: 0.75rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+    .section { margin-bottom: 24px; }
+
+    .graph-placeholder {
+      background: #0d1117;
+      border: 1px dashed #2d3548;
+      border-radius: 8px;
+      padding: 20px;
+      font-size: 0.78rem;
+      color: #475569;
+    }
+    .node-chip {
+      display: inline-block;
+      background: #1e3a5f;
+      color: #93c5fd;
+      border-radius: 6px;
+      padding: 3px 9px;
+      font-size: 0.72rem;
+      margin: 3px;
+    }
+    .edge-row { font-size: 0.75rem; color: #94a3b8; margin: 4px 0; }
+    .edge-arrow { color: #4b5563; margin: 0 6px; }
+
+    /* Resolve button in table */
+    .resolve-btn {
+      background: transparent;
+      border: 1px solid #3b82f6;
+      color: #60a5fa;
+      border-radius: 5px;
+      padding: 3px 10px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+    }
+    .resolve-btn:hover { background: #1e3a5f; }
+    .resolve-btn:disabled { border-color: #2d3548; color: #475569; cursor: not-allowed; }
+    .resolved-label { font-size: 0.7rem; color: #4ade80; font-weight: 600; }
+
+    /* Modal overlay */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #1e2330;
+      border: 1px solid #2d3548;
+      border-radius: 12px;
+      width: 480px;
+      max-width: 95vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      overflow: hidden;
+    }
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid #2d3548;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .modal-title { font-size: 0.95rem; font-weight: 600; }
+    .modal-close {
+      background: none; border: none; color: #64748b;
+      font-size: 1.2rem; cursor: pointer; line-height: 1;
+    }
+    .modal-close:hover { color: #e2e8f0; }
+    .modal-body { padding: 20px; }
+    .modal-footer {
+      padding: 14px 20px;
+      border-top: 1px solid #2d3548;
+      display: flex; gap: 10px; justify-content: flex-end;
+    }
+    .modal-step {
+      display: flex; align-items: flex-start; gap: 10px;
+      margin-bottom: 14px;
+    }
+    .step-num {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: #2d3548; color: #94a3b8;
+      font-size: 0.7rem; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; margin-top: 1px;
+    }
+    .step-num.active { background: #1e3a5f; color: #60a5fa; }
+    .step-num.done   { background: #14532d; color: #4ade80; }
+    .step-label { font-size: 0.82rem; color: #94a3b8; }
+    .step-label strong { color: #e2e8f0; display: block; margin-bottom: 2px; }
+    .action-box {
+      background: #0d1117;
+      border: 1px solid #2d3548;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-family: monospace;
+      font-size: 0.82rem;
+      color: #c4b5fd;
+      margin-top: 8px;
+      word-break: break-all;
+    }
+    .btn-cancel {
+      background: transparent; border: 1px solid #2d3548; color: #94a3b8;
+      border-radius: 7px; padding: 8px 18px; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+    }
+    .btn-cancel:hover { border-color: #475569; color: #e2e8f0; }
+    .btn-confirm {
+      background: #16a34a; color: #fff;
+      border: none; border-radius: 7px; padding: 8px 18px; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+    }
+    .btn-confirm:hover { background: #15803d; }
+    .btn-confirm:disabled { background: #14532d; color: #4ade80; cursor: not-allowed; }
+    .modal-msg { font-size: 0.8rem; margin-top: 10px; }
+    .modal-msg.ok    { color: #4ade80; }
+    .modal-msg.error { color: #f87171; }
+  </style>
+</head>
+<body>
+
+<!-- Resolve modal -->
+<div class="modal-overlay" id="resolveModal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Resolve Incident — <span id="modalIncId" style="color:#93c5fd;font-family:monospace"></span></span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-step">
+        <div class="step-num" id="step1Num">1</div>
+        <div class="step-label">
+          <strong>Step 1 — AI Preview</strong>
+          POST /api/incidents/:id/resolve/preview — LLM picks the action, nothing is executed.
+          <div class="action-box" id="previewAction" style="display:none"></div>
+        </div>
+      </div>
+      <div class="modal-step">
+        <div class="step-num" id="step2Num">2</div>
+        <div class="step-label">
+          <strong>Step 2 — Confirm &amp; Execute</strong>
+          POST /api/incidents/:id/resolve/confirm?action=... — calls orders-service and marks resolved.
+          <div class="action-box" id="confirmResult" style="display:none"></div>
+        </div>
+      </div>
+      <div class="modal-msg" id="modalMsg"></div>
+      <div id="modalDebug" style="display:none;margin-top:10px">
+        <div style="font-size:0.68rem;color:#475569;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em">Debug — last request</div>
+        <div class="raw-block" id="modalDebugText" style="max-height:100px;font-size:0.7rem"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+      <button class="btn-confirm" id="previewBtn" onclick="doPreview()">Get AI Action</button>
+      <button class="btn-confirm" id="confirmBtn" style="display:none;background:#dc2626" onclick="doConfirm()">Confirm &amp; Execute</button>
+    </div>
+  </div>
+</div>
+
+<h1>AIOps Log Viewer — Sanity Test</h1>
+<p class="subtitle">Hits all 4 read endpoints and renders live data. No React, no build step.</p>
+
+<div class="toolbar">
+  <label style="font-size:0.82rem;color:#94a3b8">API Base:</label>
+  <input id="baseUrl" class="base-input" value="http://localhost:3120" />
+  <button class="run-btn" id="runBtn" onclick="runAll()">Run Tests</button>
+</div>
+
+<!-- Summary bar (filled after run) -->
+<div class="summary-bar" id="summaryBar" style="display:none"></div>
+
+<!-- Endpoint status cards -->
+<div class="grid">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Endpoint Health</span>
+      <span class="badge badge-pending" id="healthBadge">Pending</span>
+    </div>
+    <div class="card-body" id="healthBody">
+      <div class="endpoint-row">
+        <span class="method method-get">GET</span>
+        <div class="endpoint-info">
+          <div class="endpoint-path">/api/metrics</div>
+          <div class="endpoint-status" id="st-metrics"><span class="dot dot-pending"></span>waiting</div>
+        </div>
+      </div>
+      <div class="endpoint-row">
+        <span class="method method-get">GET</span>
+        <div class="endpoint-info">
+          <div class="endpoint-path">/api/incidents</div>
+          <div class="endpoint-status" id="st-incidents"><span class="dot dot-pending"></span>waiting</div>
+        </div>
+      </div>
+      <div class="endpoint-row">
+        <span class="method method-get">GET</span>
+        <div class="endpoint-info">
+          <div class="endpoint-path">/api/graph</div>
+          <div class="endpoint-status" id="st-graph"><span class="dot dot-pending"></span>waiting</div>
+        </div>
+      </div>
+      <div class="endpoint-row">
+        <span class="method method-get">GET</span>
+        <div class="endpoint-info">
+          <div class="endpoint-path">/api/incidents/:id <span style="color:#475569;font-size:0.7rem">(first)</span></div>
+          <div class="endpoint-status" id="st-detail"><span class="dot dot-pending"></span>waiting</div>
+        </div>
+      </div>
+      <div class="endpoint-row">
+        <span class="method method-post">POST</span>
+        <div class="endpoint-info">
+          <div class="endpoint-path">/api/incidents/:id/resolve/preview</div>
+          <div class="endpoint-status" id="st-preview"><span class="dot dot-pending"></span>tested via Resolve button</div>
+        </div>
+      </div>
+      <div class="endpoint-row">
+        <span class="method method-post">POST</span>
+        <div class="endpoint-info">
+          <div class="endpoint-path">/api/incidents/:id/resolve/confirm</div>
+          <div class="endpoint-status" id="st-confirm"><span class="dot dot-pending"></span>tested via Resolve button</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Dashboard Metrics</span>
+      <span class="badge badge-pending" id="metricsBadge">Pending</span>
+    </div>
+    <div class="card-body">
+      <div class="stat-grid" id="statsGrid">
+        <div class="stat-box"><div class="stat-label">Total Incidents</div><div class="stat-value" id="m-total">—</div></div>
+        <div class="stat-box"><div class="stat-label">Open</div><div class="stat-value" id="m-open">—</div></div>
+        <div class="stat-box"><div class="stat-label">Total Occurrences</div><div class="stat-value" id="m-occ">—</div></div>
+        <div class="stat-box"><div class="stat-label">Deduped</div><div class="stat-value" id="m-dedup">—</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Incidents table -->
+<div class="section">
+  <div class="section-title">Incidents List (first 10)</div>
+  <div class="card">
+    <div class="card-body" style="padding:0">
+      <table class="incidents-table" id="incTable">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Title</th>
+            <th>Severity</th>
+            <th>Status</th>
+            <th>Services</th>
+            <th>Occurrences</th>
+            <th>Last Seen</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="incBody">
+          <tr><td colspan="8" style="color:#475569;text-align:center;padding:20px">Run tests to load data</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Incident detail + graph side by side -->
+<div class="grid" style="grid-template-columns: 1fr 1fr">
+  <div class="section" style="margin:0">
+    <div class="section-title">First Incident — Detail</div>
+    <div class="card">
+      <div class="card-body">
+        <div id="detailPanel" style="color:#475569;font-size:0.8rem">Run tests to load detail</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" style="margin:0">
+    <div class="section-title">Graph (/api/graph)</div>
+    <div class="card">
+      <div class="card-body">
+        <div id="graphPanel" style="color:#475569;font-size:0.8rem">Run tests to load graph</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Raw response dump -->
+<div class="section" style="margin-top:24px">
+  <div class="section-title">Raw /api/metrics Response</div>
+  <div class="raw-block" id="rawMetrics">—</div>
+</div>
+
+<script>
+  function base() { return document.getElementById("baseUrl").value.replace(/\/$/, ""); }
+
+  function setStatus(id, state, text) {
+    const el = document.getElementById(id);
+    el.className = "endpoint-status " + (state === "ok" ? "ok" : state === "error" ? "error" : "");
+    el.innerHTML = `<span class="dot dot-${state}"></span>${text}`;
+  }
+
+  function setBadge(id, state) {
+    const el = document.getElementById(id);
+    el.className = "badge badge-" + state;
+    el.textContent = state === "running" ? "Running…" : state === "ok" ? "OK" : state === "error" ? "Error" : "Pending";
+  }
+
+  function severityClass(s) {
+    const m = { critical:"sev-critical", high:"sev-high", medium:"sev-medium", low:"sev-low" };
+    return m[(s||"").toLowerCase()] || "sev-low";
+  }
+
+  function statusClass(s) {
+    return s === "resolved" ? "st-resolved" : "st-open";
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  }
+
+  async function fetchJSON(path) {
+    const r = await fetch(base() + path);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return r.json();
+  }
+
+  async function runAll() {
+    const btn = document.getElementById("runBtn");
+    btn.disabled = true;
+    btn.textContent = "Running…";
+
+    setBadge("healthBadge", "running");
+    setBadge("metricsBadge", "running");
+
+    // --- /api/metrics ---
+    let metrics = null;
+    setStatus("st-metrics", "running", "fetching…");
+    try {
+      metrics = await fetchJSON("/api/metrics");
+      setStatus("st-metrics", "ok", `200 OK — total_incidents: ${metrics.total_incidents}`);
+      setBadge("metricsBadge", "ok");
+      document.getElementById("m-total").textContent = metrics.total_incidents ?? "—";
+      document.getElementById("m-open").textContent  = metrics.open_incidents  ?? "—";
+      document.getElementById("m-occ").textContent   = metrics.total_occurrences ?? "—";
+      document.getElementById("m-dedup").textContent = metrics.deduped_count ?? "—";
+      document.getElementById("rawMetrics").textContent = JSON.stringify(metrics, null, 2);
+    } catch(e) {
+      setStatus("st-metrics", "error", e.message);
+      setBadge("metricsBadge", "error");
+      document.getElementById("rawMetrics").textContent = String(e);
+    }
+
+    // --- /api/incidents ---
+    let incidents = [];
+    setStatus("st-incidents", "running", "fetching…");
+    try {
+      incidents = await fetchJSON("/api/incidents");
+      setStatus("st-incidents", "ok", `200 OK — ${incidents.length} incident(s)`);
+
+      const tbody = document.getElementById("incBody");
+      const slice = incidents.slice(0, 10);
+      if (!slice.length) {
+        tbody.innerHTML = '<tr><td colspan="8" style="color:#475569;text-align:center;padding:16px">No incidents found</td></tr>';
+      } else {
+        tbody.innerHTML = slice.map(i => `
+          <tr id="row-${i.inc_id}">
+            <td style="font-family:monospace;color:#93c5fd;white-space:nowrap">${i.inc_id}</td>
+            <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(i.title||"").replace(/"/g,"&quot;")}">${i.title || "—"}</td>
+            <td><span class="severity ${severityClass(i.severity)}">${i.severity || "—"}</span></td>
+            <td><span class="status-chip ${statusClass(i.status)}" id="status-${i.inc_id}">${i.status}</span></td>
+            <td style="color:#94a3b8;font-size:0.72rem">${(i.services||[]).join(", ") || "—"}</td>
+            <td style="text-align:right;color:#94a3b8">${i.occurrences ?? "—"}</td>
+            <td style="color:#64748b;white-space:nowrap;font-size:0.72rem">${fmtTime(i.last_seen)}</td>
+            <td>${i.status === "resolved"
+              ? '<span class="resolved-label">✓ resolved</span>'
+              : `<button class="resolve-btn" id="rbtn-${i.inc_id}" onclick="openResolve('${i.inc_id}')">Resolve</button>`
+            }</td>
+          </tr>`).join("");
+      }
+    } catch(e) {
+      setStatus("st-incidents", "error", e.message);
+      document.getElementById("incBody").innerHTML = `<tr><td colspan="8" style="color:#f87171;padding:16px">${e.message}</td></tr>`;
+    }
+
+    // --- /api/incidents/:id (first incident) ---
+    setStatus("st-detail", "running", "fetching…");
+    const detailPanel = document.getElementById("detailPanel");
+    if (incidents.length) {
+      try {
+        const detail = await fetchJSON(`/api/incidents/${incidents[0].inc_id}`);
+        setStatus("st-detail", "ok", `200 OK — ${incidents[0].inc_id}`);
+        detailPanel.innerHTML = `
+          <div style="margin-bottom:10px">
+            <div style="font-size:0.95rem;font-weight:600;color:#e2e8f0;margin-bottom:4px">${detail.title || "—"}</div>
+            <div style="font-size:0.75rem;color:#64748b">Team: ${detail.team || "unassigned"} &nbsp;|&nbsp; Services: ${(detail.services||[]).join(", ")}</div>
+          </div>
+          ${detail.ai_summary ? `<div style="font-size:0.78rem;color:#94a3b8;margin-bottom:12px;line-height:1.55">${detail.ai_summary}</div>` : ""}
+          ${detail.latest_logs && detail.latest_logs.length ? `
+            <div style="font-size:0.7rem;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">Latest Logs (${detail.latest_logs.length})</div>
+            <div class="raw-block" style="max-height:120px">${detail.latest_logs.slice(0,5).map(l =>
+              `<span style="color:#64748b">[${l.service}]</span> <span style="color:#cbd5e1">${l.message}</span>`
+            ).join("\n")}</div>` : ""}
+        `;
+      } catch(e) {
+        setStatus("st-detail", "error", e.message);
+        detailPanel.innerHTML = `<span style="color:#f87171">${e.message}</span>`;
+      }
+    } else {
+      setStatus("st-detail", "ok", "skipped (no incidents)");
+      detailPanel.innerHTML = '<span style="color:#475569">No incidents to fetch detail for</span>';
+    }
+
+    // --- /api/graph ---
+    setStatus("st-graph", "running", "fetching…");
+    const graphPanel = document.getElementById("graphPanel");
+    try {
+      const g = await fetchJSON("/api/graph");
+      setStatus("st-graph", "ok", `200 OK — ${g.nodes.length} nodes, ${g.edges.length} edges`);
+      graphPanel.innerHTML = `
+        <div style="margin-bottom:10px;font-size:0.75rem;color:#64748b">
+          <strong style="color:#e2e8f0">${g.nodes.length}</strong> incident nodes &nbsp;·&nbsp;
+          <strong style="color:#e2e8f0">${g.edges.length}</strong> RELATED_TO edges
+        </div>
+        ${g.nodes.length ? `
+          <div style="margin-bottom:6px;font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Nodes</div>
+          <div style="margin-bottom:12px">${g.nodes.slice(0,12).map(n =>
+            `<span class="node-chip">${n.incident_id}</span>`
+          ).join("")}${g.nodes.length > 12 ? `<span style="font-size:0.72rem;color:#475569"> +${g.nodes.length-12} more</span>` : ""}</div>` : ""}
+        ${g.edges.length ? `
+          <div style="margin-bottom:6px;font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Edges</div>
+          <div>${g.edges.slice(0,8).map(e =>
+            `<div class="edge-row"><span style="color:#93c5fd">${e.source}</span><span class="edge-arrow">→</span><span style="color:#93c5fd">${e.target}</span> <span style="color:#4b5563">${e.reason||""}</span></div>`
+          ).join("")}${g.edges.length > 8 ? `<div style="font-size:0.72rem;color:#475569">+${g.edges.length-8} more edges</div>` : ""}</div>` : ""}
+        ${!g.nodes.length && !g.edges.length ? '<span style="color:#475569">Graph is empty</span>' : ""}
+      `;
+    } catch(e) {
+      setStatus("st-graph", "error", e.message);
+      graphPanel.innerHTML = `<span style="color:#f87171">${e.message}</span>`;
+    }
+
+    // --- Overall health badge ---
+    const allOk = ["st-metrics","st-incidents","st-graph"].every(id => {
+      return document.getElementById(id).classList.contains("ok");
+    });
+    setBadge("healthBadge", allOk ? "ok" : "error");
+
+    // --- Summary bar ---
+    const bar = document.getElementById("summaryBar");
+    bar.style.display = "flex";
+    bar.innerHTML = `
+      <div class="item"><span class="dot ${allOk ? "dot-ok" : "dot-error"}"></span><strong>${allOk ? "All endpoints healthy" : "Some endpoints failed"}</strong></div>
+      ${metrics ? `<div class="item">Incidents: <strong>${metrics.total_incidents}</strong></div>` : ""}
+      ${incidents.length ? `<div class="item">Listed: <strong>${incidents.length}</strong></div>` : ""}
+      ${metrics ? `<div class="item">Open: <strong>${metrics.open_incidents}</strong></div>` : ""}
+    `;
+
+    btn.disabled = false;
+    btn.textContent = "Re-Run Tests";
+  }
+
+  // ── Resolve modal ──────────────────────────────────────────────────────────
+  let _resolveIncId = null;
+  let _resolveAction = null;
+
+  function openResolve(incId) {
+    _resolveIncId = incId;
+    _resolveAction = null;
+
+    document.getElementById("modalIncId").textContent = incId;
+    document.getElementById("previewAction").style.display = "none";
+    document.getElementById("previewAction").textContent = "";
+    document.getElementById("confirmResult").style.display = "none";
+    document.getElementById("confirmResult").textContent = "";
+    document.getElementById("modalMsg").textContent = "";
+    document.getElementById("modalMsg").className = "modal-msg";
+
+    document.getElementById("step1Num").className = "step-num active";
+    document.getElementById("step2Num").className = "step-num";
+
+    document.getElementById("previewBtn").style.display = "";
+    document.getElementById("previewBtn").disabled = false;
+    document.getElementById("previewBtn").textContent = "Get AI Action";
+    document.getElementById("confirmBtn").style.display = "none";
+
+    document.getElementById("resolveModal").classList.add("open");
+  }
+
+  function closeModal() {
+    document.getElementById("resolveModal").classList.remove("open");
+    _resolveIncId = null;
+    _resolveAction = null;
+  }
+
+  async function doPreview() {
+    const btn = document.getElementById("previewBtn");
+    btn.disabled = true;
+    btn.textContent = "Asking LLM…";
+    document.getElementById("modalMsg").textContent = "";
+
+    function showDebug(lines) {
+      const el = document.getElementById("modalDebug");
+      document.getElementById("modalDebugText").textContent = lines.join("\n");
+      el.style.display = "";
+    }
+
+    const previewUrl = base() + `/api/incidents/${_resolveIncId}/resolve/preview`;
+    const getUrl    = base() + `/api/incidents/${_resolveIncId}`;
+    showDebug([`Checking incident exists first...`, `GET ${getUrl}`]);
+
+    // Step 0: confirm the incident still exists in DB right now
+    try {
+      const chk = await fetch(getUrl);
+      const chkBody = await chk.text();
+      if (chk.status === 404) {
+        showDebug([`GET ${getUrl}`, `→ HTTP 404`, chkBody, ``, `Incident is NOT in the DB. Re-run tests to refresh the list.`]);
+        throw new Error(`Incident ${_resolveIncId} not found in DB (404). Re-run tests to get a fresh list.`);
+      }
+      let chkParsed;
+      try { chkParsed = JSON.parse(chkBody); } catch { chkParsed = chkBody; }
+      showDebug([
+        `GET ${getUrl}  →  HTTP ${chk.status}`,
+        `status: ${chkParsed.status}  severity: ${chkParsed.severity}`,
+        `title: ${chkParsed.title}`,
+        ``,
+        `Now calling preview...`,
+        `POST ${previewUrl}`,
+      ]);
+      if (chkParsed.status === "resolved") {
+        throw new Error(`Incident ${_resolveIncId} is already resolved (status=resolved in DB).`);
+      }
+    } catch(e) {
+      if (e.message.includes("not found") || e.message.includes("already resolved")) {
+        document.getElementById("modalMsg").textContent = e.message;
+        document.getElementById("modalMsg").className = "modal-msg error";
+        btn.disabled = false; btn.textContent = "Retry";
+        return;
+      }
+    }
+
+    try {
+      const r = await fetch(previewUrl, { method: "POST" });
+      const rawBody = await r.text();
+      showDebug([
+        `GET ${getUrl}  →  OK`,
+        `POST ${previewUrl}`,
+        `→ HTTP ${r.status}`,
+        `body: ${rawBody}`,
+      ]);
+      if (!r.ok) {
+        throw new Error(`HTTP ${r.status}: ${rawBody}`);
+      }
+      const data = JSON.parse(rawBody);
+      _resolveAction = data.action;
+
+      document.getElementById("step1Num").className = "step-num done";
+      document.getElementById("step2Num").className = "step-num active";
+
+      const box = document.getElementById("previewAction");
+      box.textContent = `Recommended action: ${data.action}`;
+      box.style.display = "";
+
+      setStatus("st-preview", "ok", `200 OK — action: ${data.action}`);
+
+      document.getElementById("modalMsg").textContent = "LLM picked an action. Review it, then confirm to execute.";
+      document.getElementById("modalMsg").className = "modal-msg ok";
+
+      btn.style.display = "none";
+      const cfm = document.getElementById("confirmBtn");
+      cfm.style.display = "";
+      cfm.disabled = false;
+      cfm.textContent = `Execute: ${data.action}`;
+    } catch(e) {
+      setStatus("st-preview", "error", e.message);
+      document.getElementById("modalMsg").textContent = e.message;
+      document.getElementById("modalMsg").className = "modal-msg error";
+      btn.disabled = false;
+      btn.textContent = "Retry";
+    }
+  }
+
+  async function doConfirm() {
+    const btn = document.getElementById("confirmBtn");
+    btn.disabled = true;
+    btn.textContent = "Executing…";
+    document.getElementById("modalMsg").textContent = "";
+
+    try {
+      const url = base() + `/api/incidents/${_resolveIncId}/resolve/confirm?action=${encodeURIComponent(_resolveAction)}`;
+      const r = await fetch(url, { method: "POST" });
+      if (!r.ok) {
+        let detail = "";
+        try { detail = JSON.stringify(await r.json()); } catch { detail = await r.text(); }
+        throw new Error(`HTTP ${r.status}: ${detail}`);
+      }
+      const data = await r.json();
+
+      document.getElementById("step2Num").className = "step-num done";
+
+      const box = document.getElementById("confirmResult");
+      box.textContent = JSON.stringify(data, null, 2);
+      box.style.display = "";
+
+      setStatus("st-confirm", "ok", `200 OK — ${_resolveIncId} resolved`);
+
+      document.getElementById("modalMsg").textContent = "Incident resolved successfully.";
+      document.getElementById("modalMsg").className = "modal-msg ok";
+
+      // Update table row status chip and swap button
+      const chip = document.getElementById(`status-${_resolveIncId}`);
+      if (chip) { chip.className = "status-chip st-resolved"; chip.textContent = "resolved"; }
+      const rbtn = document.getElementById(`rbtn-${_resolveIncId}`);
+      if (rbtn) { rbtn.outerHTML = '<span class="resolved-label">✓ resolved</span>'; }
+
+      btn.textContent = "Done";
+    } catch(e) {
+      setStatus("st-confirm", "error", e.message);
+      document.getElementById("modalMsg").textContent = e.message;
+      document.getElementById("modalMsg").className = "modal-msg error";
+      btn.disabled = false;
+      btn.textContent = "Retry";
+    }
+  }
+
+  // Close modal on overlay click
+  document.getElementById("resolveModal").addEventListener("click", function(e) {
+    if (e.target === this) closeModal();
+  });
+</script>
+</body>
+</html>

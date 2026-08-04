@@ -1,351 +1,149 @@
 # AIOps Demo
 
-An AI-powered incident management system for a simulated ecommerce platform. A load generator injects realistic faults, fires a webhook with logs and trace context, and an LLM automatically creates incidents with root cause hypotheses, evidence, and team routing.
+An AI-powered incident management system for a simulated ecommerce platform. The orders service generates structured logs and metrics; an AI worker clusters errors, embeds them via AWS Bedrock, and deduplicates them into incidents viewable on a live dashboard.
 
 ---
 
 ## Architecture
 
 ```
-load-gen/generate.py
-  │  generates logs to stdout
-  │  injects faults (ERROR spans)
-  └─ POST /api/webhook/grafana
-       │  payload: alert + logs + trace
-       ▼
-aiops  (FastAPI + Claude via Bedrock)
-  │  reads context from payload
-  │  calls LLM to analyze
-  └─ saves incident to PostgreSQL (aiops-db)
-
-Containers (host ports live in the 3111-3116 range to avoid clashing with
-whatever else already holds the conventional defaults on this machine):
-  aiops-db      :3111 — shared Postgres (incidents + teams/users + telemetry)
-  aiops-pgadmin :3112 — Postgres admin UI
-  aiops-backend :3113 — Python FastAPI backend + web UI
-  loki          :3115 — log aggregation
-  grafana       :3116 — dashboards over Loki
-
-LLM call observability (prompts, completions, latency, tokens) goes to
-Langfuse Cloud (https://cloud.langfuse.com) — not a local container.
+orders-service  (FastAPI — simulates orders + payments, injects faults)
+  │  writes structured logs + metrics rows
+  ▼
+aiops-db  (PostgreSQL — logs, metrics, incidents, traces, teams, users)
+  │
+  ├─▶ log-viewer worker  (Drain3 clustering → Bedrock embeddings → incident dedup)
+  │       │  writes incidents to Postgres + Neo4j
+  │       ▼
+  │   neo4j  (graph of Service / Incident / ErrorPattern nodes + RELATED_TO edges)
+  │
+  └─▶ log-viewer API  (FastAPI — read-only REST API over incidents + graph)
+          │  serves React SPA at /
+          ▼
+      log-viewer UI  (React + Vite — Dashboard, Incidents table, Graph view)
 ```
+
+The `log-viewer` container runs **all three** (worker + API + UI) as a single combined service.
+
+---
+
+## Services & Ports
+
+| Service | Host Port | Purpose |
+|---|---|---|
+| `aiops-db` | `3111` | Shared PostgreSQL |
+| `neo4j` (HTTP) | `3118` | Neo4j browser UI |
+| `neo4j` (Bolt) | `3119` | Bolt driver |
+| `orders-service` | `3114` | Orders + Payments API |
+| `log-viewer` | `3120` | Worker + REST API (`/api/*`) + React UI (`/`) |
 
 ---
 
 ## How to Run
 
-### 1. Set up your `.env`
+### 1. Copy and configure `.env`
 ```bash
 cp .env.example .env
 ```
-Sign up at [Langfuse Cloud](https://cloud.langfuse.com) (or the US region at `us.cloud.langfuse.com` — update `LANGFUSE_HOST` to match), create a project, and fill in `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` from Settings -> API Keys. The rest have working local defaults. Langfuse tracing is optional — if you leave the keys blank, `agent.py` skips it silently.
+Fill in your AWS credentials for Bedrock access (used by the log-viewer worker for embeddings):
+```
+AWS_BEARER_TOKEN_BEDROCK=...
+```
 
-### 2. Log in to AWS (Bedrock access, needed by aiops-backend)
+### 2. Log in to AWS (Bedrock)
 ```bash
 aws sso login --profile AI
 ```
-The container mounts `~/.aws` read-only so it can reuse this cached SSO session — no AWS setup happens inside the container itself. If the token expires, re-run this and restart the `aiops-backend` container:
+The container mounts `~/.aws` read-only to reuse the cached SSO session. If the token expires, re-run this and restart:
 ```bash
-podman compose restart aiops-backend
+podman compose restart log-viewer
 ```
 
-### 3. Build the frontend
-```bash
-cd web && npm install && npm run build && cd ..
-```
-`compose.yaml` mounts `web/dist` (the built output) into the `aiops-api` container — it does **not** serve the raw TSX source. Re-run this after every frontend change; otherwise `aiops-api` will fail to start (`main.py` mounts `FRONTEND_DIR/assets`, which only exists post-build). For live-reloading frontend development instead, skip this and run `npm run dev` in `web/` (`http://localhost:5173`) — it proxies `/api` to the same backend.
-
-### 4. Start all containers
+### 3. Start all containers
 ```bash
 podman compose up -d --build
 ```
-Run this from the project root — `compose.yaml` and `.env` both live there now, so compose picks up `.env` automatically with no extra flags.
 
-This builds and starts everything: `aiops-db`, `aiops-backend` (Python), and the observability stack.
-
-- AIOps UI: `http://localhost:3113`
-- Grafana: `http://localhost:3116`
-- pgAdmin: `http://localhost:3112`
-- Langfuse (LLM call traces): `https://cloud.langfuse.com` — hosted, not part of this stack
-
-#### Default login (AIOps UI)
-A default admin account is seeded automatically on every fresh install (Alembic migration `0001`, attached to the pre-seeded "Default Org"):
-```
-email:    admin@cybage.com
-password: admin@123
-```
-**Dev/demo credentials only** — same spirit as the dev-only `JWT_SECRET`/`CREDENTIAL_ENCRYPTION_KEY` defaults in `.env.example`. This password is public (it's in git), so change it (or delete the account and register a real one via `POST /api/auth/register` / the UI's register page) before any real or shared deployment.
-
-### 5. Run a scenario (second terminal)
-```bash
-cd load-gen
-
-python demo.py fault "Cascade Failure"       # continuous traffic + fault (Ctrl+C to stop)
-python demo.py once  "Payment Gateway Down"  # single shot, exits after one round
-python demo.py run   "DB Pool Exhausted"     # fault + waits + prints incident
-python demo.py list                          # show all fault names
-```
+- **Log Viewer UI**: `http://localhost:3120`
+- **API docs (Swagger)**: `http://localhost:3120/docs`
+- **Neo4j browser**: `http://localhost:3118`
+- **Orders service**: `http://localhost:3114`
 
 ---
 
-## Logs
+## Log Viewer API Endpoints
 
-Every log line follows this format:
-```
-2026-07-22 11:22:02 INFO     [product-service] GET /api/products/search | query="shoes" | results=39 | latency=102ms | trace_id=4072ff...
-```
-
-**Fields:** `timestamp | level | [service] | message | key=value pairs | trace_id=<hex>`
-
-### Normal traffic (INFO only)
-
-Four user journeys run continuously in the background:
-
-| Journey | Services | Sample log |
+| Method | Path | Description |
 |---|---|---|
-| Browse | product-service | `GET /api/products/search \| query="shoes" \| latency=102ms` |
-| Add to cart | product, cart, inventory | `POST /api/cart/add \| user=usr_58684 \| qty=1` |
-| Checkout | cart, order, inventory, payment, notification | `charge \| amount=156.94 \| status=approved` |
-| Order status | order, notification | `GET /api/orders/ord_166257 \| status=shipped` |
+| GET | `/api/incidents` | List incidents (filter: `?service=X&status=Y`) |
+| GET | `/api/incidents/{id}` | Get a single incident |
+| GET | `/api/metrics` | Dashboard counts + per-service breakdown |
+| GET | `/api/graph` | Neo4j incident relationship graph |
 
-### Fault logs (ERROR / WARN / CRITICAL)
-
-Each fault injects specific log lines alongside normal traffic:
-
-| Fault | Services | Levels | Sample |
-|---|---|---|---|
-| Payment Gateway Down | payment, order | CRITICAL, ERROR | `Gateway unreachable \| endpoint=stripe.api \| retry=1/3 \| circuit_breaker=OPEN` |
-| Auth / JWT Failures | cart | ERROR, WARN, CRITICAL | `JWT validation failed \| reason=token_expired \| ip=10.0.x.x` |
-| DB Pool Exhausted | order | WARN, ERROR, CRITICAL | `DB pool exhausted \| max_capacity=50 \| queued=58 \| timeout=30s` |
-| Inventory Race Condition | inventory | ERROR, CRITICAL, WARN | `Oversell detected \| product=4821 \| stock=-3` |
-| Cascade Failure | payment, order, cart, product | CRITICAL, ERROR, WARN | 4 services each logging their view of the failure |
-| High Latency / SLA Breach | product | WARN, ERROR | `p99=4850ms \| SLA_breach=true`, retry storm |
-| Memory / OOM Pressure | order | WARN, ERROR, CRITICAL | `Heap climbing \| used=91%` → `OOM imminent` |
-| Shipping API Down | notification | ERROR, CRITICAL | `FedEx unreachable \| retry=3/3` |
+Interactive docs at `http://localhost:3120/docs`.
 
 ---
 
-## Traces
+## Orders Service — Fault Injection
 
-Traces are text representations of a span waterfall — each line is one span showing service, operation, error status, and duration.
+Toggle faults via the admin endpoints on `http://localhost:3114`:
 
-### Format
-```
-TRACE <trace_id>:
-  [service-name] span-name [ERROR?] duration=Xms | key=value | key=value
-```
-
-### Example — Cascade Failure
-```
-TRACE a3f9c2d1...:
-  [payment-service] cascade_root [ERROR] duration=41ms  | error=Cascade failure
-  [order-service]   checkout     duration=15ms          | downstream=payment-service
-  [cart-service]    get_cart     duration=9ms
-  [product-service] browse       duration=7ms           | upstream_errors=cascading
-```
-
-### Example — Payment Gateway Down
-```
-TRACE 7145d9...:
-  [payment-service] charge [ERROR] duration=38ms | error=gateway_timeout | payment.amount=245.99
-  [order-service]   create_order  duration=12ms  | order.id=ord_882341
-```
-
-### Example — Checkout (normal, no fault)
-```
-TRACE f75869...:
-  [cart-service]         get_cart      duration=18ms
-  [order-service]        create_order  duration=34ms
-  [inventory-service]    reserve_stock duration=28ms
-  [payment-service]      charge        duration=180ms | payment.method=paypal | status=approved
-  [notification-service] send_email    duration=12ms
-```
-
----
-
-## Span Errors
-
-Span errors are set explicitly on the root span of each fault. They identify where the failure originated.
-
-| Fault | Span name | Error message |
-|---|---|---|
-| Payment Gateway Down | `charge` | `gateway_timeout` |
-| Auth / JWT Failures | `auth_check` | `JWT validation failed` |
-| DB Pool Exhausted | `db_query` | `DB pool exhausted` |
-| Inventory Race Condition | `reserve_stock` | `Oversell detected` |
-| Cascade Failure | `cascade_root` | `Cascade failure` |
-| High Latency / SLA Breach | `search` | `p99=Xms SLA breach` |
-| Memory / OOM Pressure | `process_orders` | `OOM imminent` |
-| Shipping API Down | `send_shipping_update` | `Shipping API unreachable` |
-
----
-
-## Deterministic vs Non-deterministic
-
-| Part | Behaviour | What varies |
-|---|---|---|
-| Log structure and field names | Deterministic | — |
-| Log values | Non-deterministic | IP address, heap %, p99, retry count, product ID, amounts |
-| trace_id | Non-deterministic | Random 128-bit hex each invocation |
-| Which fault fires | Deterministic | Set by `--fault` argument |
-| Webhook trigger | Deterministic | Always fires on first ERROR span per fault |
-| Cooldown | Deterministic | 60s between re-fires for same fault |
-
----
-
-## When the Webhook Fires
-
-```
-Fault injector called
-  → log lines printed to stdout
-  → _fire_webhook() checks 60s cooldown per (service, alertname)
-    → if allowed: background thread POSTs to AIOps
-      → AIOps returns 202 immediately
-        → background task: reads context, calls LLM, saves incident
-```
-
-In **continuous mode** (`python demo.py fault "..."`):
-- Fault runs every ~3 seconds (every 6th tick at rate=2)
-- Webhook fires once, then suppressed for 60 seconds
-- After 60s, fires again if fault is still active — LLM updates existing incident rather than creating a duplicate
-
----
-
-## Webhook Payload Structure
-
-```json
-{
-  "alerts": [{
-    "status": "firing",
-    "labels": {
-      "alertname":    "Cascade Failure",
-      "severity":     "critical",
-      "app":          "demo-service",
-      "service_name": "payment-service",
-      "trace_id":     "a3f9c2d1...",
-      "alert_source": "trace"
-    },
-    "annotations": {
-      "summary":     "Cascade Failure on payment-service",
-      "description": "payment-service down, cascade spreading to order -> cart -> product"
-    },
-    "startsAt": "2026-07-22T11:22:02Z"
-  }],
-  "context": {
-    "logs": [
-      "2026-07-22 11:22:02 CRITICAL [payment-service] Service down | circuit_breaker=OPEN | trace_id=a3f9c2...",
-      "2026-07-22 11:22:02 ERROR    [order-service] payment-service unreachable | retry=3/3 | trace_id=a3f9c2...",
-      "2026-07-22 11:22:02 ERROR    [cart-service] order-service timeout | downstream_degraded | trace_id=a3f9c2...",
-      "2026-07-22 11:22:02 WARN     [product-service] Elevated error rate | p99=1800ms | trace_id=a3f9c2..."
-    ],
-    "traces": [
-      "TRACE a3f9c2...:",
-      "  [payment-service] cascade_root [ERROR] duration=41ms | error=Cascade failure",
-      "  [order-service]   checkout     duration=15ms | downstream=payment-service",
-      "  [cart-service]    get_cart     duration=9ms",
-      "  [product-service] browse       duration=7ms | upstream_errors=cascading"
-    ]
-  }
-}
-```
-
-### Fields
-
-| Field | Description |
+| Endpoint | Description |
 |---|---|
-| `alerts[].labels.alertname` | Human-readable alert name |
-| `alerts[].labels.severity` | `critical` or `high` (see below) |
-| `alerts[].labels.service_name` | Root service where the fault originated |
-| `alerts[].labels.trace_id` | Hex trace ID linking logs to trace spans |
-| `alerts[].labels.alert_source` | Always `trace` — triggered by span error |
-| `alerts[].annotations.description` | One-line description of what happened |
-| `context.logs` | Log lines for this trace, newest fault first |
-| `context.traces` | Span waterfall for this trace |
-
----
-
-## Severity Levels
-
-| Severity | Meaning | Faults |
-|---|---|---|
-| `critical` | Full outage — service completely down, data integrity broken, or cascade in progress | Payment Gateway Down, Cascade Failure, DB Pool Exhausted |
-| `high` | Degraded service — SLA breach, elevated error rate, resource pressure | Auth Failures, High Latency, OOM Pressure, Shipping API Down, Inventory Race |
-
----
-
-## Incident Structure (AIOps output)
-
-After the LLM processes the webhook, an incident is saved with:
-
-```json
-{
-  "inc_id": "INC-0001",
-  "title": "payment-service Circuit Breaker OPEN Cascade Failure",
-  "severity": "critical",
-  "services": ["payment-service", "order-service"],
-  "team": "payments-platform",
-  "hypotheses": [
-    { "confidence": 91, "text": "payment-service crashed causing circuit breaker to trip..." },
-    { "confidence": 42, "text": "downstream dependency became unavailable..." }
-  ],
-  "evidence": [
-    { "type": "log",     "label": "payment-service CRITICAL", "text": "Service down | circuit_breaker=OPEN..." },
-    { "type": "trace",   "label": "cascade_root span",        "text": "[payment-service] cascade_root [ERROR] duration=41ms" },
-    { "type": "pattern", "label": "Cascade detection",        "text": "order-service errors are 1:1 with payment-service failures by trace_id" }
-  ],
-  "ai_summary": "payment-service entered a full outage at 11:22:02Z...",
-  "timeline": [
-    { "time": "11:22:38", "event": "Logs analyzed by AI agent" },
-    { "time": "11:22:38", "event": "Root cause hypotheses generated" },
-    { "time": "11:22:38", "event": "Routed to payments-platform" }
-  ]
-}
-```
+| `POST /admin/fault/bad-deploy` | Simulate a bad deployment |
+| `POST /admin/fault/memory-leak` | Simulate a memory leak |
+| `POST /admin/fault/db-leak` | Simulate DB connection leak |
+| `POST /admin/fault/bad-payment` | Simulate payment provider failures |
+| `POST /admin/fault/cpu-throttle` | Simulate CPU throttling |
+| `POST /admin/reset` | Reset all faults |
 
 ---
 
 ## Project Structure
 
 ```
-Hackathon/
-├── compose.yaml          — aiops-db, aiops-backend, orchestrator, orders/payments-service
-├── .env                  — AWS/Bedrock + Langfuse Cloud keys, shared by all services (never commit)
+aiops/
+├── Dockerfile              — multi-stage: Node builds React, Python runs worker + API
+├── compose.yaml            — all services: aiops-db, neo4j, orders-service, log-viewer
+├── .env                    — secrets and port overrides (never commit)
 ├── .env.example
-├── .gitignore            — single project-wide gitignore
-├── .dockerignore         — single project-wide dockerignore (both Dockerfiles build from repo root)
 │
-├── load-gen/
-│   ├── generate.py       — load generator + fault injectors + webhook firing
-│   ├── demo.py           — CLI: normal / fault / once / run / list
-│   ├── requirements.txt  — only: requests
-│   └── .venv/            — Python venv (used only if running load-gen locally)
+├── db/
+│   └── init/01_init.sql    — PostgreSQL schema (logs, metrics, incidents, traces, teams, users)
 │
-├── web/                   — served by aiops-backend at "/" (FRONTEND_DIR)
-│   ├── index.html
-│   ├── app.js
-│   └── style.css
+├── services/
+│   └── python-services/    — orders + payments FastAPI service
 │
-└── aiops/
-    ├── main.py           — FastAPI, webhook handler, Loki/Tempo fetch (live mode)
-    ├── agent.py          — LLM prompt + Bedrock call
-    ├── incidents.py      — PostgreSQL incident CRUD
-    ├── database.py       — DB init + schema
-    ├── teams.py          — Team + user management
-    ├── requirements.txt
-    ├── start.sh          — run locally (outside Docker) with AWS_PROFILE=AI
-    └── Dockerfile         — build context is the project root, so it can also COPY web/
+├── log-viewer/
+│   ├── service.py          — polling worker: Drain3 → Bedrock → FAISS → Postgres + Neo4j
+│   ├── entrypoint.sh       — starts worker + uvicorn in same container
+│   ├── embeddings.py       — AWS Bedrock Titan embedding calls
+│   ├── neo4j_store.py      — Neo4j upsert helpers
+│   ├── postgres_store.py   — Postgres incident CRUD
+│   ├── pull_logs.py        — polls the logs table
+│   ├── vector_store.py     — FAISS in-memory incident index
+│   └── requirements.txt    — psycopg2, drain3, boto3, faiss-cpu, numpy, neo4j
+│
+└── log-viewer-ui/
+    ├── api/
+    │   ├── main.py         — FastAPI: /api/* endpoints + serves React static files
+    │   ├── db.py           — Postgres queries
+    │   ├── graph.py        — Neo4j queries
+    │   └── requirements.txt — fastapi, uvicorn, psycopg2, neo4j
+    └── web/                — React + TypeScript + Vite + MUI
+        ├── src/
+        │   ├── pages/      — Dashboard, Incidents, Graph
+        │   └── components/
+        └── package.json
 ```
 
 ---
 
-## Ports
+## How Incident Detection Works
 
-| Service | URL | Purpose |
-|---|---|---|
-| AIOps UI | `http://localhost:3113` | Incident dashboard |
-| pgAdmin | `http://localhost:3112` | Postgres admin UI |
-| Telemetry API | `http://localhost:3114` | .NET logs/traces/metrics ingestion |
-| aiops-db (Postgres) | `localhost:3111` | Shared DB — incidents, teams/users, telemetry |
-| Loki | `localhost:3115` | Log aggregation |
-| Grafana | `http://localhost:3116` | Dashboards over Loki |
-| Langfuse | `https://cloud.langfuse.com` | LLM call traces (hosted, not part of this stack) |
+1. **Poll** — worker fetches new `ERROR` log rows from Postgres every 5s
+2. **Cluster** — Drain3 extracts a structural template from the log message
+3. **Embed** — AWS Bedrock Titan generates a 1024-dim vector for the template
+4. **Match** — FAISS cosine similarity search (threshold 0.45) against known incidents for the same service
+5. **Deduplicate** — match found → bump `occurrences`; no match → new `INC-XXXX` row
+6. **Graph** — Neo4j nodes updated; new incidents get at most one `RELATED_TO` edge to the strongest cross-service match

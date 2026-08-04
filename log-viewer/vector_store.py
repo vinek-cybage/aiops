@@ -19,6 +19,10 @@ class IncidentStore:
     def __init__(self, dim):
         self.index = faiss.IndexFlatIP(dim)
         self.incidents = []  # position == FAISS vector id
+        self._resolved: set = set()  # indices of resolved incidents — skipped in search
+
+    def resolve(self, idx: int):
+        self._resolved.add(idx)
 
     def search_same_service(self, vector, threshold, service):
         """Best match restricted to the same service — the dedup/merge decision."""
@@ -27,7 +31,7 @@ class IncidentStore:
         scores, ids = self.index.search(vector.reshape(1, -1), self.index.ntotal)
         best = None
         for idx, score in zip(ids[0], scores[0]):
-            if idx == -1 or self.incidents[idx]["service"] != service:
+            if idx == -1 or idx in self._resolved or self.incidents[idx]["service"] != service:
                 continue
             if best is None or score > best[1]:
                 best = (int(idx), float(score))

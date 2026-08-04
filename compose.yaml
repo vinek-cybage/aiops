@@ -36,36 +36,16 @@ services:
 
   orders-service:
     build:
-      context: .
-      dockerfile: services/orders-service/Dockerfile
+      context: ./services/python-services
     container_name: orders-service
     env_file:
       - .env
     environment:
-      - DATABASE_URL=Host=aiops-db;Port=5432;Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@aiops-db:5432/${POSTGRES_DB}
       - ORDERS_SERVICE_PORT=8081
-      - PAYMENTS_SERVICE_HOST=payments-service
-      - PAYMENTS_SERVICE_PORT=8082
+      - PAYMENTS_SERVICE_URL=http://orders-service:8081
     ports:
       - "${ORDERS_SERVICE_HOST_PORT:-3114}:8081"
-    depends_on:
-      aiops-db:
-        condition: service_healthy
-      # aiops-api:
-      #   condition: service_healthy
-    networks: [aiops]
-
-  payments-service:
-    build:
-      context: .
-      dockerfile: services/payments-service/Dockerfile
-    container_name: payments-service
-    env_file:
-      - .env
-    environment:
-      - DATABASE_URL=Host=aiops-db;Port=5432;Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB}
-    ports:
-      - "${PAYMENTS_SERVICE_HOST_PORT:-3115}:8082"
     depends_on:
       aiops-db:
         condition: service_healthy
@@ -74,7 +54,6 @@ services:
   log-viewer:
     build:
       context: .
-      dockerfile: log-viewer/Dockerfile
     container_name: log-viewer
     restart: unless-stopped
     env_file:
@@ -83,49 +62,14 @@ services:
       - POSTGRES_HOST=aiops-db
       - POSTGRES_HOST_PORT=5432
       - NEO4J_URI=bolt://neo4j:7687
+      - ORDERS_SERVICE_URL=http://orders-service:8081
+    ports:
+      - "${LOG_VIEWER_HOST_PORT:-3120}:8000"
     depends_on:
       aiops-db:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-    networks: [aiops]
-
-  # Standalone log-viewer UI — same incidents/metrics/graph data as
-  # /api/log-viewer/* on aiops-api, served by its own small read-only API +
-  # frontend (kept alongside the aiops-api integration, not a replacement).
-  log-viewer-api:
-    build:
-      context: .
-      dockerfile: log-viewer-ui/api/Dockerfile
-    container_name: log-viewer-api
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - POSTGRES_HOST=aiops-db
-      - POSTGRES_HOST_PORT=5432
-      - NEO4J_URI=bolt://neo4j:7687
-    ports:
-      - "${LOG_VIEWER_API_HOST_PORT:-3120}:8000"
-    depends_on:
-      aiops-db:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-    networks: [aiops]
-
-  log-viewer-web:
-    build:
-      context: .
-      dockerfile: log-viewer-ui/web/Dockerfile
-    container_name: log-viewer-web
-    restart: unless-stopped
-    environment:
-      - VITE_API_PROXY_TARGET=http://log-viewer-api:8000
-    ports:
-      - "${LOG_VIEWER_WEB_HOST_PORT:-3121}:4000"
-    depends_on:
-      - log-viewer-api
     networks: [aiops]
 
 

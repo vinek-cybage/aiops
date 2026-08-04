@@ -75,7 +75,28 @@ export interface GraphData {
   edges: GraphEdge[];
 }
 
+export interface ResolvePreview {
+  inc_id: string;
+  action: string;
+}
+
+export interface ResolveResponse {
+  inc_id: string;
+  action: string;
+  orders_response: unknown;
+  message?: string;
+}
+
 export const listIncidents = () => apiJson<IncidentSummary[]>("/api/incidents");
 export const getIncident = (incId: string) => apiJson<IncidentDetail>(`/api/incidents/${incId}`);
 export const getMetrics = () => apiJson<DashboardMetrics>("/api/metrics");
 export const getGraph = () => apiJson<GraphData>("/api/graph");
+
+export const previewResolve = (incId: string) =>
+  apiJson<ResolvePreview>(`/api/incidents/${incId}/resolve/preview`, { method: "POST" });
+
+export const confirmResolve = (incId: string, action: string) =>
+  apiJson<ResolveResponse>(
+    `/api/incidents/${incId}/resolve/confirm?action=${encodeURIComponent(action)}`,
+    { method: "POST" }
+  );

@@ -55,6 +55,19 @@ def get_incident(inc_id):
         conn.close()
 
 
+def resolve_incident(inc_id: str):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE incidents SET status = 'resolved', last_seen = NOW() WHERE inc_id = %s",
+                (inc_id,)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def dashboard_metrics():
     conn = get_conn()
     try:

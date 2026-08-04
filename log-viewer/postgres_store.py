@@ -91,33 +91,33 @@ def ensure_team_exists(conn, team_name):
         return False
 
 
-def insert_incident(conn, inc_id, template, log):
+def insert_incident(conn, inc_id, template, log, ai_summary=None):
     """Insert a new incident into the incidents table.
-    
+
     Team is set to the service name (team = service).
     Also ensures the team exists in the teams table for future user assignment.
     """
     cur = conn.cursor()
-    
+
     # Ensure the team exists in the teams table
     team_name = log["service"]
     ensure_team_exists(conn, team_name)
-    
+
     # Prepare the timeline entry
     timeline = json.dumps([{"time": _now_str(), "event": "Incident opened", "color": "#818cf8"}])
-    
+
     # Prepare services array (PostgreSQL array format)
     services = [log["service"]]
-    
+
     # Prepare latest_logs as JSON array
     latest_logs = json.dumps([log])
-    
+
     # Insert with team = service name
     cur.execute("""
         INSERT INTO incidents (
             inc_id, title, severity, status, services, team,
-            timeline, occurrences, first_seen, last_seen, latest_logs
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
+            timeline, occurrences, first_seen, last_seen, latest_logs, ai_summary
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s)
     """, (
         inc_id,                          # inc_id
         template,                        # title
@@ -129,7 +129,8 @@ def insert_incident(conn, inc_id, template, log):
         1,                               # occurrences (initial count)
         log["ts"],                       # first_seen
         log["ts"],                       # last_seen
-        latest_logs                      # latest_logs (jsonb)
+        latest_logs,                     # latest_logs (jsonb)
+        ai_summary                       # ai_summary (text, may be None)
     ))
     cur.close()
 

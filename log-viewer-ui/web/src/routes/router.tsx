@@ -3,7 +3,6 @@ import { AppLayout } from "./AppLayout";
 import { DashboardPage } from "../pages/dashboard/DashboardPage";
 import { IncidentsListPage } from "../pages/incidents/IncidentsListPage";
 import { IncidentDetailPage } from "../pages/incidents/IncidentDetailPage";
-import { GraphPage } from "../pages/graph/GraphPage";
 
 export const router = createBrowserRouter([
   {
@@ -14,7 +13,6 @@ export const router = createBrowserRouter([
       { path: "dashboard", element: <DashboardPage /> },
       { path: "incidents", element: <IncidentsListPage /> },
       { path: "incidents/:incId", element: <IncidentDetailPage /> },
-      { path: "graph", element: <GraphPage /> },
     ],
   },
 ]);
