@@ -161,7 +161,7 @@ def _sync_resolved(pg_conn):
     global cluster_to_incident
     cur = pg_conn.cursor()
     cur.execute("SELECT inc_id FROM incidents WHERE status = 'resolved'")
-    resolved_ids = {row[0] for row in cur.fetchall()}
+    resolved_ids = {row["inc_id"] for row in cur.fetchall()}
     cur.close()
     for idx, inc in enumerate(store.incidents):
         if inc["incident_id"] in resolved_ids and idx not in store._resolved:

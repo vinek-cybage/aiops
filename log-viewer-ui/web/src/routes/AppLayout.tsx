@@ -1,30 +1,44 @@
-import { AppBar, Box, Drawer, IconButton, List, ListItemButton, ListItemText, Toolbar, Typography } from "@mui/material";
+import { AppBar, Box, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Toolbar, Tooltip, Typography } from "@mui/material";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
+import DashboardRoundedIcon from "@mui/icons-material/DashboardRounded";
+import ReportProblemRoundedIcon from "@mui/icons-material/ReportProblemRounded";
+import HubRoundedIcon from "@mui/icons-material/HubRounded";
+import LogoutRoundedIcon from "@mui/icons-material/LogoutRounded";
 import { NavLink, Outlet } from "react-router-dom";
 import { brandGradient } from "../theme/theme";
 import { useThemeMode } from "../theme/ThemeModeProvider";
+import { useAuth } from "../auth/AuthProvider";
 
 const DRAWER_WIDTH = 220;
 
 const NAV_ITEMS = [
-  { label: "Dashboard", to: "/dashboard" },
-  { label: "Incidents", to: "/incidents" },
+  { label: "Dashboard", to: "/dashboard", icon: <DashboardRoundedIcon /> },
+  { label: "Incidents", to: "/incidents", icon: <ReportProblemRoundedIcon /> },
+  { label: "Graph", to: "/graph", icon: <HubRoundedIcon /> },
 ];
 
 export function AppLayout() {
   const { mode, toggle } = useThemeMode();
+  const { logout } = useAuth();
 
   return (
     <Box sx={{ display: "flex" }}>
       <AppBar position="fixed" elevation={0} sx={{ background: brandGradient, zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Toolbar>
           <Typography variant="h6" sx={{ fontWeight: 700, flexGrow: 1 }}>
-            Log Viewer
+            AI-Ops
           </Typography>
-          <IconButton color="inherit" onClick={toggle}>
-            {mode === "dark" ? <LightModeIcon /> : <DarkModeIcon />}
-          </IconButton>
+          <Tooltip title={mode === "dark" ? "Switch to light mode" : "Switch to dark mode"}>
+            <IconButton color="inherit" onClick={toggle}>
+              {mode === "dark" ? <LightModeIcon /> : <DarkModeIcon />}
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Log out">
+            <IconButton color="inherit" onClick={logout}>
+              <LogoutRoundedIcon />
+            </IconButton>
+          </Tooltip>
         </Toolbar>
       </AppBar>
 
@@ -48,9 +62,11 @@ export function AppLayout() {
                   bgcolor: "action.selected",
                   borderRight: "3px solid",
                   borderColor: "primary.main",
+                  "& .MuiListItemIcon-root": { color: "primary.main" },
                 },
               }}
             >
+              <ListItemIcon sx={{ minWidth: 40 }}>{item.icon}</ListItemIcon>
               <ListItemText primary={item.label} />
             </ListItemButton>
           ))}

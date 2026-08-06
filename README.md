@@ -7,7 +7,7 @@ An AI-powered incident management system for a simulated ecommerce platform. The
 ## Architecture
 
 ```
-orders-service  (FastAPI — simulates orders + payments, injects faults)
+aiops-services  (FastAPI — simulates orders + payments, injects faults)
   │  writes structured logs + metrics rows
   ▼
 aiops-db  (PostgreSQL — logs, metrics, incidents, traces, teams, users)
@@ -15,7 +15,7 @@ aiops-db  (PostgreSQL — logs, metrics, incidents, traces, teams, users)
   ├─▶ log-viewer worker  (Drain3 clustering → Bedrock embeddings → incident dedup)
   │       │  writes incidents to Postgres + Neo4j
   │       ▼
-  │   neo4j  (graph of Service / Incident / ErrorPattern nodes + RELATED_TO edges)
+  │   aiops-neo4j  (graph of Service / Incident / ErrorPattern nodes + RELATED_TO edges)
   │
   └─▶ log-viewer API  (FastAPI — read-only REST API over incidents + graph)
           │  serves React SPA at /
@@ -32,10 +32,10 @@ The `log-viewer` container runs **all three** (worker + API + UI) as a single co
 | Service | Host Port | Purpose |
 |---|---|---|
 | `aiops-db` | `3111` | Shared PostgreSQL |
-| `neo4j` (HTTP) | `3118` | Neo4j browser UI |
-| `neo4j` (Bolt) | `3119` | Bolt driver |
-| `orders-service` | `3114` | Orders + Payments API |
-| `log-viewer` | `3120` | Worker + REST API (`/api/*`) + React UI (`/`) |
+| `aiops-neo4j` (HTTP) | `3112` | Neo4j browser UI |
+| `aiops-neo4j` (Bolt) | `3113` | Bolt driver |
+| `aiops-services` | `3114` | Orders + Payments API |
+| `log-viewer` | `3115` | Worker + REST API (`/api/*`) + React UI (`/`) |
 
 ---
 
@@ -54,20 +54,22 @@ AWS_BEARER_TOKEN_BEDROCK=...
 ```bash
 aws sso login --profile AI
 ```
-The container mounts `~/.aws` read-only to reuse the cached SSO session. If the token expires, re-run this and restart:
+The container mounts `~/.aws` (read-write — boto3 needs to write refreshed SSO tokens back to `~/.aws/sso/cache/`) to reuse the cached SSO session. If the token expires, re-run this and restart:
 ```bash
-podman compose restart log-viewer
+docker compose restart log-viewer
 ```
 
 ### 3. Start all containers
 ```bash
-podman compose up -d --build
+docker compose up -d --build
 ```
 
-- **Log Viewer UI**: `http://localhost:3120`
-- **API docs (Swagger)**: `http://localhost:3120/docs`
-- **Neo4j browser**: `http://localhost:3118`
+- **Log Viewer UI**: `http://localhost:3115`
+- **API docs (Swagger)**: `http://localhost:3115/docs`
+- **Neo4j browser**: `http://localhost:3112`
 - **Orders service**: `http://localhost:3114`
+
+Log in with the access code `aiops2026` (cosmetic client-side gate only — not real authentication).
 
 ---
 
@@ -80,7 +82,7 @@ podman compose up -d --build
 | GET | `/api/metrics` | Dashboard counts + per-service breakdown |
 | GET | `/api/graph` | Neo4j incident relationship graph |
 
-Interactive docs at `http://localhost:3120/docs`.
+Interactive docs at `http://localhost:3115/docs`.
 
 ---
 
@@ -90,12 +92,18 @@ Toggle faults via the admin endpoints on `http://localhost:3114`:
 
 | Endpoint | Description |
 |---|---|
-| `POST /admin/fault/bad-deploy` | Simulate a bad deployment |
-| `POST /admin/fault/memory-leak` | Simulate a memory leak |
-| `POST /admin/fault/db-leak` | Simulate DB connection leak |
-| `POST /admin/fault/bad-payment` | Simulate payment provider failures |
-| `POST /admin/fault/cpu-throttle` | Simulate CPU throttling |
-| `POST /admin/reset` | Reset all faults |
+| `POST /admin/deploy` | Simulate a bad deployment (500s on `GET /orders/{id}`) |
+| `POST /admin/rollback` | Roll back the bad deployment |
+| `POST /admin/memory-leak/on` | Simulate a memory leak |
+| `POST /admin/database-connection-leak/on` | Simulate DB connection leak (pool exhaustion → 500s) |
+| `POST /admin/payment-provider/stripe` | Simulate payment provider failures (Stripe) |
+| `POST /admin/payment-provider/paypal` | Restore the healthy payment provider (Paypal) |
+| `POST /admin/cpu-throttle/on` | Simulate CPU throttling |
+| `POST /admin/concurrency-limit/on` | Simulate a concurrency limit (429s) |
+| `POST /admin/scale-out` | Disable CPU throttle + concurrency limit |
+| `POST /admin/restart-pod` | Clear leaked memory + DB connections |
+
+Only 3 faults reach the log-viewer worker as `ERROR`-level logs (the only level it clusters into incidents): `deploy` (bad pricing calc on `GET /orders/{id}`), `database-connection-leak/on` (pool exhaustion on `GET /orders/{id}`), and `payment-provider/stripe`, which also surfaces as two distinct incidents on the orders side — `POST /orders/{id}/checkout` logs its own `ERROR` when the payment call it makes fails, with a different message depending on whether Stripe returned a gateway error (503) or was unreachable (502). Memory leak, CPU throttle, and concurrency limit only log at `WARN`/`INFO` and won't produce incidents.
 
 ---
 
@@ -104,7 +112,7 @@ Toggle faults via the admin endpoints on `http://localhost:3114`:
 ```
 aiops/
 ├── Dockerfile              — multi-stage: Node builds React, Python runs worker + API
-├── compose.yaml            — all services: aiops-db, neo4j, orders-service, log-viewer
+├── compose.yaml            — all services: aiops-db, aiops-neo4j, aiops-services, log-viewer
 ├── .env                    — secrets and port overrides (never commit)
 ├── .env.example
 │
@@ -132,8 +140,18 @@ aiops/
     │   └── requirements.txt — fastapi, uvicorn, psycopg2, neo4j
     └── web/                — React + TypeScript + Vite + MUI
         ├── src/
-        │   ├── pages/      — Dashboard, Incidents, Graph
-        │   └── components/
+        │   ├── auth/       — AuthProvider (cosmetic sessionStorage login gate)
+        │   ├── routes/
+        │   │   ├── guards/RequireAuth.tsx — redirects to /login if not authed
+        │   │   ├── router.tsx  — routes: /login, /, /incidents, /graph
+        │   │   └── AppLayout.tsx — nav (icons, logout) + theme toggle
+        │   ├── pages/
+        │   │   ├── auth/LoginPage.tsx
+        │   │   ├── dashboard/ — stat tiles, StatusDonutChart, service bar chart
+        │   │   ├── incidents/
+        │   │   └── graph/
+        │   ├── components/  — StatTile, ServiceBarChart, StatusDonutChart, ...
+        │   └── theme/theme.ts — orange & black brand palette
         └── package.json
 ```
 

@@ -21,7 +21,7 @@ except Exception as _llm_err:
     print(f"[startup] llm import failed ({_llm_err}) — resolve endpoints disabled")
     _llm_available = False
 
-ORDERS_SERVICE_URL = os.environ.get("ORDERS_SERVICE_URL", "http://orders-service:8081")
+ORDERS_SERVICE_URL = os.environ.get("ORDERS_SERVICE_URL", "http://aiops-services:8081")
 
 app = FastAPI(title="log-viewer-ui API")
 

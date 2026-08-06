@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { getMetrics } from "../../api/endpoints";
 import { StatTile } from "../../components/StatTile";
 import { ServiceBarChart } from "../../components/ServiceBarChart";
+import { StatusDonutChart } from "../../components/StatusDonutChart";
 
 export function DashboardPage() {
   const navigate = useNavigate();
@@ -22,9 +23,14 @@ export function DashboardPage() {
       <Stack direction="row" spacing={2} flexWrap="wrap">
         <StatTile label="Total incidents" value={data.total_incidents} />
         <StatTile label="Open incidents" value={data.open_incidents} />
-        <StatTile label="Total occurrences" value={data.total_occurrences} />
-        <StatTile label="Deduplicated" value={data.deduped_count} />
       </Stack>
+
+      <Paper sx={{ p: 3 }}>
+        <Typography variant="h6" sx={{ mb: 2 }}>
+          Incident status
+        </Typography>
+        <StatusDonutChart open={data.open_incidents} total={data.total_incidents} />
+      </Paper>
 
       <Paper sx={{ p: 3 }}>
         <Typography variant="h6" sx={{ mb: 2 }}>
