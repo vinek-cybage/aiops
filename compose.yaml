@@ -34,6 +34,27 @@ services:
       retries: 10
     networks: [aiops]
 
+  aiops-neo4j-ssh:
+    image: neo4j:5-community
+    container_name: aiops-neo4j-ssh
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-aiops123456}
+    ports:
+      - "${NEO4J_SSH_HTTP_HOST_PORT:-3116}:7474"
+      - "${NEO4J_SSH_BOLT_HOST_PORT:-3117}:7687"
+    volumes:
+      - neo4j-ssh-data:/data
+      - neo4j-ssh-logs:/logs
+      - ./data/ssh_graph_seed.cypher:/import/ssh_graph_seed.cypher:ro
+      - ./neo4j/entrypoint.sh:/neo4j-entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/neo4j-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 5s
+      retries: 20
+    networks: [aiops]
+
   aiops-services:
     build:
       context: ./services/python-services
@@ -62,6 +83,7 @@ services:
       - POSTGRES_HOST=aiops-db
       - POSTGRES_HOST_PORT=5432
       - NEO4J_URI=bolt://aiops-neo4j:7687
+      - NEO4J_SSH_URI=bolt://aiops-neo4j-ssh:7687
       - ORDERS_SERVICE_URL=http://aiops-services:8081
     ports:
       - "${LOG_VIEWER_HOST_PORT:-3115}:8000"
@@ -76,12 +98,16 @@ services:
         condition: service_healthy
       aiops-neo4j:
         condition: service_healthy
+      aiops-neo4j-ssh:
+        condition: service_healthy
     networks: [aiops]
 
 volumes:
   aiops-db-data:
   neo4j-data:
   neo4j-logs:
+  neo4j-ssh-data:
+  neo4j-ssh-logs:
 
 networks:
   aiops:
